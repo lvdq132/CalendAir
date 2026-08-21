@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "atlas-flight-booking": {
+      "source": "atlas-doc/atlas-flight-booking-skill",
+      "sourceType": "github",
+      "skillPath": "skills/atlas-flight-booking/SKILL.md",
+      "computedHash": "dffbe3c072fb0e8f9329b5ca6cd63dbdedde0cbc66378e9c1f2bb5701d1e7faf"
+    }
+  }
+}
