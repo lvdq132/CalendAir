@@ -1,4 +1,5 @@
 import type { AtlasAdapter } from "@/lib/atlas";
+import { AtlasProviderUnavailableError } from "@/lib/atlas/adapter";
 import { runOpportunityEngine } from "./engine";
 import { activityEvent, pushActivity, type CalendarBlock, type Session } from "./store";
 import { DESTINATION_BY_IATA } from "./destinations";
@@ -73,7 +74,8 @@ export type AuthorizeOutcome =
   | { kind: "confirmed"; total: number; currency: string }
   | { kind: "price-changed"; previous: number; current: number; currency: string }
   | { kind: "unavailable"; replacement?: ScoredTrip }
-  | { kind: "safe-stop"; reason: string };
+  | { kind: "safe-stop"; reason: string }
+  | { kind: "provider-unavailable"; reason: string };
 
 /**
  * FR-007 + FR-008 — the traveller authorises, then the world is re-read.
@@ -125,13 +127,37 @@ async function reverify(
   try {
     current = await atlas.verifyOffer(trip.id);
   } catch (err) {
-    // Verification can fail for reasons that are not "the fare is gone" —
-    // ticketing entitlement blocked (SUBSCRIPTION_REQUIRED in skill mode), or
-    // in hybrid mode a live offer id the demo ticketing adapter was never
-    // going to recognise (see HybridAtlasAdapter.verifyOffer). Either way we
-    // do not fabricate a verified price and we do not crash the checkpoint —
-    // report the real reason and stop for a human decision.
     const detail = err instanceof Error ? err.message : "This fare could not be verified.";
+
+    // A provider outage at reverify ("Atlas didn't answer, even after
+    // retrying") and a genuine terminal refusal ("the fare is gone" /
+    // ticketing entitlement blocked, e.g. SUBSCRIPTION_REQUIRED in skill
+    // mode, or in hybrid mode a live offer id the demo ticketing adapter was
+    // never going to recognise — see HybridAtlasAdapter.verifyOffer) are
+    // different facts and must not collapse into the same SAFE_STOP the UI
+    // reads as "the agent looked and deliberately stopped" — see
+    // PROVIDER_UNAVAILABLE in calendair/types.ts and
+    // AtlasProviderUnavailableError in atlas/adapter.ts. Either way we do
+    // not fabricate a verified price and we do not crash the checkpoint —
+    // report the real reason and stop for a human decision.
+    if (err instanceof AtlasProviderUnavailableError) {
+      pushActivity(
+        session,
+        activityEvent("ATLAS", "Rechecking live fare", detail, false, Date.now() - started),
+      );
+      session.booking.state = "PROVIDER_UNAVAILABLE";
+      pushActivity(
+        session,
+        activityEvent(
+          "CALENDAIR",
+          "Provider unavailable",
+          "We couldn't reach the flight provider to recheck this fare — this is not a statement about whether it is still available.",
+          false,
+        ),
+      );
+      return { kind: "provider-unavailable", reason: detail };
+    }
+
     pushActivity(
       session,
       activityEvent("ATLAS", "Rechecking live fare", detail, false, Date.now() - started),
@@ -270,14 +296,34 @@ export async function book(session: Session, atlas: AtlasAdapter) {
       approvedCurrency: session.booking.approvedCurrency!,
     });
   } catch (err) {
-    // Same principle as reverify()'s catch: a provider that cannot be reached
-    // at the moment of the first write is not a silent crash and not a quiet
-    // retry (order create is deliberately never retried — see skill-adapter.ts)
-    // — it is an honest, reported failure the traveller can see and act on.
-    const detail = err instanceof Error ? err.message : "The booking request could not be completed.";
-    session.booking.state = "BOOKING_FAILED";
-    pushActivity(session, activityEvent("ATLAS", "Booking rejected", detail, false));
-    return { ok: false as const, reason: detail };
+    // Not the same as a rejected booking. createBooking() only throws when
+    // runCliWithStdin got nothing parseable back — including on its 60s
+    // timeout, which is exactly the case where the order may have already
+    // been accepted upstream before the response was lost. Because `order
+    // create` is deliberately never retried (retrying it here risks a
+    // duplicate order — the one thing this product must never do by
+    // accident), this is the one irreducibly unknown outcome in the flow:
+    // we did not receive a rejection, we received silence. Claiming
+    // BOOKING_FAILED here would be exactly the "confident improvisation"
+    // this product exists not to do — the mirror image of treating an
+    // unconfirmed response as a success. No reference is invented, because
+    // there is nothing honest to invent: pollFulfilment cannot recover a
+    // truth we never learned in the first place.
+    const detail =
+      err instanceof Error
+        ? err.message
+        : "The booking request could not be completed, and its outcome could not be confirmed.";
+    session.booking.state = "BOOKING_OUTCOME_UNKNOWN";
+    pushActivity(
+      session,
+      activityEvent(
+        "ATLAS",
+        "Booking outcome unknown",
+        `${detail} · could not confirm whether this went through`,
+        false,
+      ),
+    );
+    return { ok: false as const, reason: detail, outcomeUnknown: true as const };
   }
   session.booking.result = result;
   session.booking.reference = result.reference;

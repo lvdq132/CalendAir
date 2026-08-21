@@ -146,8 +146,16 @@ on the home screen, `/demo`, and `/api/health`:
 |---|---|---|---|
 | *(unset, the default)* | Deterministic demo | Deterministic demo | Nothing is live. This is what the judged demo runs on. |
 | `skill` | **Live** `atlas-flight` CLI | Live CLI | Search works. Ticketing is blocked for this account (`TICKETING_ACTIVATION_REQUIRED`), so `verifyOffer` and everything after it fails until activation completes at atriptech.com. |
-| `hybrid` | **Live** CLI | Deterministic demo | Composes the two adapters above: real inventory for search, demo ticketing because the account can't ticket yet. Never falls back to demo search on a live failure — see below. |
+| `hybrid` | **Live** CLI | **Unreachable dead end today**, not "deterministic demo" | Real inventory for search. `verifyOffer` delegates to the demo adapter, but a live-search offer id (e.g. `atl-lon-bcn-…`) never matches the demo adapter's fixed inventory (ids like `atl-dxb-nonstop`), so it always throws → the flow always safe-stops with an explicit `TICKETING_ACTIVATION_REQUIRED` message → `PRICE_CONFIRMED` is never reached → `createBooking` / `getBookingStatus` are unreachable dead code in this mode. Never falls back to demo search on a live failure — see below. |
 | `atrip` | — | — | Placeholder. Fails loudly; nothing is implemented. |
+
+`hybrid` is honest about *why* it stops (see `HybridAtlasAdapter.verifyOffer`'s file-header comment for the
+full reasoning), but it does not currently make the booking checkpoints past search demonstrable — there is
+no synthesized "demo verification" of a live offer, on purpose: fabricating a verified price/availability
+from a live search result, even labelled "demo", is exactly the kind of unchecked-number-presented-as-checked
+failure this product exists to prevent. If the booking checkpoints need to be demonstrable against real
+search results before ticketing activation completes, that requires a deliberate, explicitly-labelled
+synthetic-verification path — not implemented here.
 
 Two things worth being precise about, because they are exactly the kind of distinction a stage demo
 is tempted to blur:
@@ -157,11 +165,16 @@ is tempted to blur:
   `searchFlights` retries up to 3 times with backoff before giving up, and only then throws
   `AtlasProviderUnavailableError` — which the UI renders as *"We couldn't reach the flight
   provider… this is not a statement about availability"*, never as "no flights."
-- **`order create` is the one call that is never retried.** Every other Atlas call is safe to retry
-  (`getStatus`, `searchFlights`, `verifyOffer`, `getBookingStatus` are all read-only). Booking is
-  not idempotent — retrying it on a transient failure risks a duplicate order, which this product
-  must never do by accident. A `createBooking` failure is surfaced once, as a reported
-  `BOOKING_FAILED` state the traveller can see, not a silent retry loop and not an unhandled crash.
+- **`order create` is the one call that is never retried.** Every other Atlas call is safe to retry —
+  `getStatus` and `getBookingStatus` genuinely are read-only; `searchFlights` is too. `verifyOffer`
+  is *not* read-only (it mints a `booking_id` and traveler records that `createBooking` later
+  depends on — see `verifyCache` in `skill-adapter.ts`), but it is still idempotent to call again,
+  which is what makes retrying it safe. Booking itself is not idempotent — retrying `order create`
+  on a transient failure risks a duplicate order, which this product must never do by accident. A
+  `createBooking` failure that the provider actually answered is surfaced once, as a reported
+  `BOOKING_FAILED` state the traveller can see; a `createBooking` call that timed out with no
+  parseable answer at all is a different, genuinely unknown outcome (`BOOKING_OUTCOME_UNKNOWN`) —
+  never a silent retry loop and never an unhandled crash either way.
 
 The flight-layer guide inside the app (`?` → *The flight layer*) covers authorisation, the Sandbox
 rehearsal, reference-versus-bookable offers, and why a Sandbox ticket is a test result.

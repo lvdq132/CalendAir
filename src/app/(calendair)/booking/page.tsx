@@ -41,6 +41,7 @@ export default function BookingScreen() {
   const [pollExhausted, setPollExhausted] = useState(false);
   const pollRef = useRef<number | null>(null);
   const attemptsRef = useRef(0);
+  const inFlightRef = useRef(false);
   const [resumeKey, setResumeKey] = useState(0);
 
   const state = booking.state;
@@ -62,20 +63,38 @@ export default function BookingScreen() {
     setPolling(true);
     setPollExhausted(false);
     attemptsRef.current = 0;
-    pollRef.current = window.setInterval(async () => {
+    inFlightRef.current = false;
+    pollRef.current = window.setInterval(() => {
+      // Guard against overlap: with a slow provider, a naive unguarded async
+      // callback on a 1.2s interval can pile up dozens of concurrent CLI
+      // round-trips. Skip this tick entirely if the previous poll hasn't
+      // resolved yet, rather than firing another.
+      if (inFlightRef.current) return;
+      inFlightRef.current = true;
       attemptsRef.current += 1;
-      const next = await pollFulfilment();
-      if (next && next !== "BOOKING_PENDING") {
-        stop();
-        setPolling(false);
-        if (next === "COMPLETE") router.push("/trip");
-        return;
-      }
-      if (attemptsRef.current >= MAX_POLL_ATTEMPTS) {
-        stop();
-        setPolling(false);
-        setPollExhausted(true);
-      }
+      pollFulfilment()
+        .then((next) => {
+          if (next && next !== "BOOKING_PENDING") {
+            stop();
+            setPolling(false);
+            if (next === "COMPLETE") router.push("/trip");
+            return;
+          }
+          if (attemptsRef.current >= MAX_POLL_ATTEMPTS) {
+            stop();
+            setPolling(false);
+            setPollExhausted(true);
+          }
+        })
+        .catch(() => {
+          // A rejected poll (e.g. a network-level failure fetch() itself
+          // throws on) must not escape as an unhandled promise rejection and
+          // must not stop the loop early — "we don't know yet, ask again" is
+          // exactly what the next tick is for.
+        })
+        .finally(() => {
+          inFlightRef.current = false;
+        });
     }, 1200);
     return stop;
   }, [state, pollFulfilment, router, stop, resumeKey]);
@@ -92,7 +111,7 @@ export default function BookingScreen() {
     );
   }
 
-  if (!verified && state !== "SAFE_STOP" && state !== "SOLD_OUT") {
+  if (!verified && state !== "SAFE_STOP" && state !== "SOLD_OUT" && state !== "PROVIDER_UNAVAILABLE") {
     return (
       <Screen back="/">
         <Card pad>
@@ -163,7 +182,13 @@ export default function BookingScreen() {
             </p>
             {booking.reference && (
               <p className="ca-label ca-num" style={{ marginTop: "var(--ca-2)" }}>
-                Reference {booking.reference} <span style={{ opacity: 0.6 }}>· sandbox</span>
+                {/* booking.result.testMode is set by the adapter that actually created this
+                    booking — never hardcode "sandbox", or a real ATLAS_ENV=production
+                    reference gets mislabelled as a rehearsal. */}
+                Reference {booking.reference}{" "}
+                <span style={{ opacity: 0.6 }}>
+                  · {booking.result?.testMode ?? true ? "sandbox" : "production"}
+                </span>
               </p>
             )}
             {pollExhausted && (
@@ -200,6 +225,38 @@ export default function BookingScreen() {
               await authorize(outcome.replacement!.id);
             }}
           />
+        )}
+
+        {state === "PROVIDER_UNAVAILABLE" && (
+          <Card pad data-tour="booking.decision">
+            <span className="ca-eyebrow">Provider unavailable</span>
+            <p className="ca-serif" style={{ fontSize: "var(--ca-t-lg)", margin: "8px 0" }}>
+              We couldn&apos;t reach the flight provider to recheck this fare.
+            </p>
+            <p style={{ color: "var(--ca-stone-500)", fontSize: "var(--ca-t-sm)" }}>
+              {error ??
+                "This is not a statement about whether the fare is still available — Atlas didn't answer, even after retrying, so nothing was ruled out. Nothing was booked and your calendar is untouched."}
+            </p>
+            <Link href="/" className="ca-btn ca-btn--quiet" style={{ marginTop: "var(--ca-5)" }}>
+              Back to your escape
+            </Link>
+          </Card>
+        )}
+
+        {state === "BOOKING_OUTCOME_UNKNOWN" && (
+          <Card pad data-tour="booking.decision">
+            <span className="ca-eyebrow">Outcome unknown</span>
+            <p className="ca-serif" style={{ fontSize: "var(--ca-t-lg)", margin: "8px 0" }}>
+              We could not confirm whether this booking went through.
+            </p>
+            <p style={{ color: "var(--ca-stone-500)", fontSize: "var(--ca-t-sm)" }}>
+              {error ??
+                "The booking request could not be completed, but the provider never told us it was rejected either — it may have gone through. Please check with the provider before retrying, so this cannot be booked twice."}
+            </p>
+            <Link href="/" className="ca-btn ca-btn--quiet" style={{ marginTop: "var(--ca-5)" }}>
+              Back to your escape
+            </Link>
+          </Card>
         )}
 
         {((state === "SAFE_STOP" || state === "BOOKING_FAILED") ||
@@ -320,7 +377,15 @@ function Progress({ state }: { state: BookingState }) {
     <Card pad data-tour="booking.steps">
       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
         <span className="ca-eyebrow">Checkpoints</span>
-        <Pill tone={state === "SAFE_STOP" ? "rose" : "outline"}>{state.replace(/_/g, " ").toLowerCase()}</Pill>
+        <Pill
+          tone={
+            state === "SAFE_STOP" || state === "PROVIDER_UNAVAILABLE" || state === "BOOKING_OUTCOME_UNKNOWN"
+              ? "rose"
+              : "outline"
+          }
+        >
+          {state.replace(/_/g, " ").toLowerCase()}
+        </Pill>
       </div>
       <div className="ca-steps" style={{ marginTop: "var(--ca-2)" }}>
         {STEPS.map((s) => {

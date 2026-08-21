@@ -367,7 +367,7 @@ describe("book() / pollFulfilment() resilience — a provider outage after the c
     return { session, demoAtlas };
   }
 
-  it("turns a createBooking failure into BOOKING_FAILED instead of throwing", async () => {
+  it("turns a createBooking failure with no parseable reply into BOOKING_OUTCOME_UNKNOWN, not a claimed BOOKING_FAILED", async () => {
     const { session, demoAtlas } = await readyForBooking();
     const throwingAtlas: AtlasAdapter = {
       getStatus: () => demoAtlas.getStatus(),
@@ -376,7 +376,13 @@ describe("book() / pollFulfilment() resilience — a provider outage after the c
       async createBooking() {
         // Mirrors what an unreachable atlas-flight CLI looks like: no
         // parseable response, so the adapter throws rather than returning a
-        // BookingResult (see runCliRetrying in skill-adapter.ts).
+        // BookingResult (see runCliWithStdin in skill-adapter.ts — this is
+        // also what its 60s timeout looks like, which is precisely the case
+        // where the order may already have been accepted upstream). This is
+        // not the same fact as a rejected booking (BOOKING_FAILED) — it is
+        // "we don't know", the one irreducibly unknown outcome in the flow,
+        // since order create is deliberately never retried. See FIX 3 /
+        // BOOKING_OUTCOME_UNKNOWN in flow.ts's book().
         throw new Error("Atlas CLI failed: no parseable response after 3 attempts");
       },
       getBookingStatus: (reference) => demoAtlas.getBookingStatus(reference),
@@ -386,7 +392,10 @@ describe("book() / pollFulfilment() resilience — a provider outage after the c
 
     expect(outcome.ok).toBe(false);
     expect(outcome.ok === false && outcome.reason).toMatch(/no parseable response/);
-    expect(session.booking.state).toBe("BOOKING_FAILED");
+    expect(session.booking.state).toBe("BOOKING_OUTCOME_UNKNOWN");
+    expect(session.booking.state).not.toBe("BOOKING_FAILED");
+    // No reference is invented for an outcome that was never actually learned.
+    expect(session.booking.reference).toBeUndefined();
     // Reported, not swallowed.
     expect(
       session.activity.some((a) => a.ok === false && /no parseable response/.test(a.detail)),

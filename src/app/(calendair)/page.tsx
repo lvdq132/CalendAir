@@ -179,7 +179,11 @@ export default function Home() {
                 type="button"
                 className="ca-btn ca-btn--quiet"
                 onClick={() => {
-                  tried.current = false;
+                  // Deliberately does NOT reset tried.current: this button
+                  // already triggers the retry directly. Resetting it too
+                  // used to let the auto-scan effect notice `scanning`
+                  // flipping back to false after this scan finishes and
+                  // fire a second, unrequested scan for the same click.
                   void scan();
                 }}
               >
@@ -201,7 +205,11 @@ export default function Home() {
                 type="button"
                 className="ca-btn ca-btn--quiet"
                 onClick={() => {
-                  tried.current = false;
+                  // Deliberately does NOT reset tried.current: this button
+                  // already triggers the retry directly. Resetting it too
+                  // used to let the auto-scan effect notice `scanning`
+                  // flipping back to false after this scan finishes and
+                  // fire a second, unrequested scan for the same click.
                   void scan();
                 }}
               >

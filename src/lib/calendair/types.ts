@@ -221,6 +221,7 @@ export type BookingState =
   | "OFFER_EXPIRED"
   | "SOLD_OUT"
   | "BOOKING_FAILED"
+  | "BOOKING_OUTCOME_UNKNOWN"
   | "SAFE_STOP"
   | "PROVIDER_UNAVAILABLE";
 

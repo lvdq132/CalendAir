@@ -84,8 +84,14 @@ at `https://www.atriptech.com/#/workspace` to unlock price verification, order c
 With `ATLAS_INTEGRATION_MODE=skill` the live adapter is active for every call; offers currently
 return `price_status: "reference"` and the booking flow correctly stops at `authorize()` until
 ticketing is enabled. `ATLAS_INTEGRATION_MODE=hybrid` gets the same live search today without
-waiting on that activation — `verifyOffer` still stops honestly, but for a documented reason
-(`TICKETING_ACTIVATION_REQUIRED`, surfaced as a safe stop) rather than a dead end.
+waiting on that activation — `verifyOffer` stops honestly, with a documented reason
+(`TICKETING_ACTIVATION_REQUIRED`, surfaced as a safe stop). Be precise about what that means,
+though: it **is** a dead end for the booking checkpoints, not "rather than" one — a live-search
+offer id can never match `DemoAtlasAdapter`'s fixed inventory, so `verifyOffer` always throws in
+hybrid mode, `PRICE_CONFIRMED` is never reached, and `createBooking` / `getBookingStatus` are
+unreachable dead code for as long as this account's ticketing stays blocked. What hybrid mode
+demonstrates today is real search against real inventory, honestly stopped at the first checkpoint
+past it — not an end-to-end rehearsal. See the README's Atlas boundary section for the full table.
 
 ## Known gaps
 

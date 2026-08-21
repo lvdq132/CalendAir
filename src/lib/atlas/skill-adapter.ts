@@ -230,7 +230,21 @@ const RETRY_MAX_ATTEMPTS = 3; // total attempts, including the first — not jus
 const RETRY_BASE_DELAY_MS = 300; // backoff before the 2nd attempt; doubles each attempt after
 const RETRY_MAX_DELAY_MS = 3_000; // backoff never grows past this
 const RETRY_JITTER_MS = 200; // random jitter added to every backoff, so a parallel fan-out doesn't retry in lockstep
-const RETRY_TOTAL_CEILING_MS = 20_000; // cumulative backoff time for one logical call; a flaky provider cannot hang a scan indefinitely
+const RETRY_TOTAL_CEILING_MS = 20_000; // cumulative *backoff* time for one logical call — does NOT bound attempt/execFile time, see CALL_WALL_CLOCK_BUDGET_MS
+const ATTEMPT_TIMEOUT_MS = 30_000; // ceiling on any single execFile attempt
+/**
+ * Wall-clock ceiling for one *logical* call — every attempt plus every
+ * backoff sleep combined. RETRY_TOTAL_CEILING_MS above bounds only the time
+ * spent sleeping between retries; on its own it does nothing to stop a
+ * slow-but-not-dead provider, because each of up to RETRY_MAX_ATTEMPTS
+ * attempts can independently run for up to ATTEMPT_TIMEOUT_MS (30s) — up to
+ * ~91s for one call, and searchFlights fans that out across 9 destinations
+ * in parallel, so a scan could hang for a minute and a half. A deadline
+ * computed once per logical call and threaded down as the per-attempt
+ * execFile timeout closes that: no attempt can run past the deadline, and no
+ * further attempt starts once it has passed.
+ */
+const CALL_WALL_CLOCK_BUDGET_MS = 30_000;
 
 function isRetryableEnvelope(envelope: CliEnvelope | null): boolean {
   if (!envelope) return true; // no parseable JSON at all — a process-level failure, worth a retry
@@ -247,25 +261,35 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Run `attempt()` up to `maxAttempts` times, backing off between retryable
- * failures (see isRetryableEnvelope). Stops early once
- * RETRY_TOTAL_CEILING_MS of cumulative backoff has elapsed. Returns whatever
- * the last attempt produced — success, a non-retryable error envelope
- * (e.g. SUBSCRIPTION_REQUIRED — retrying that would just waste the ceiling),
- * a still-retryable envelope if every attempt flaked, or null if no attempt
- * ever produced parseable JSON.
+ * Run `attempt(timeoutMs)` up to `maxAttempts` times, backing off between
+ * retryable failures (see isRetryableEnvelope). `timeoutMs` is recomputed
+ * before every attempt from a deadline set once at the start of the call —
+ * `Math.min(ATTEMPT_TIMEOUT_MS, deadline - Date.now())` — so no single
+ * attempt can push the logical call past CALL_WALL_CLOCK_BUDGET_MS, and no
+ * further attempt starts once the deadline has passed. Also still stops
+ * early once RETRY_TOTAL_CEILING_MS of cumulative backoff has elapsed.
+ * Returns whatever the last attempt produced — success, a non-retryable
+ * error envelope (e.g. SUBSCRIPTION_REQUIRED — retrying that would just
+ * waste the budget), a still-retryable envelope if every attempt flaked or
+ * the deadline was reached, or null if no attempt ever produced parseable
+ * JSON.
  */
 async function withRetry(
-  attempt: () => Promise<CliEnvelope | null>,
+  attempt: (timeoutMs: number) => Promise<CliEnvelope | null>,
   maxAttempts: number = RETRY_MAX_ATTEMPTS,
 ): Promise<CliEnvelope | null> {
   const startedAt = Date.now();
-  let result = await attempt();
+  const deadline = startedAt + CALL_WALL_CLOCK_BUDGET_MS;
+  const timeoutForNextAttempt = () => Math.min(ATTEMPT_TIMEOUT_MS, Math.max(0, deadline - Date.now()));
+
+  let result = await attempt(timeoutForNextAttempt());
   let tries = 1;
   while (isRetryableEnvelope(result) && tries < maxAttempts) {
     if (Date.now() - startedAt >= RETRY_TOTAL_CEILING_MS) break;
+    if (Date.now() >= deadline) break; // wall-clock budget for this logical call is exhausted
     await sleep(backoffDelayMs(tries - 1));
-    result = await attempt();
+    if (Date.now() >= deadline) break;
+    result = await attempt(timeoutForNextAttempt());
     tries += 1;
   }
   return result;
@@ -276,11 +300,12 @@ async function withRetry(
 /**
  * One CLI attempt — no retry. Returns null (instead of throwing) on any
  * process-level failure, so withRetry / Promise.all can treat "no response"
- * uniformly with a retryable envelope.
+ * uniformly with a retryable envelope. `timeoutMs` is the deadline-aware
+ * per-attempt ceiling computed by withRetry — see CALL_WALL_CLOCK_BUDGET_MS.
  */
-async function runCliOnce(args: string[]): Promise<CliEnvelope | null> {
+async function runCliOnce(args: string[], timeoutMs: number = ATTEMPT_TIMEOUT_MS): Promise<CliEnvelope | null> {
   try {
-    const { stdout } = await execFileP(CLI, [...args, "--json"], { timeout: 30_000 });
+    const { stdout } = await execFileP(CLI, [...args, "--json"], { timeout: timeoutMs });
     return JSON.parse(stdout) as CliEnvelope;
   } catch (err: unknown) {
     if (err && typeof err === "object" && "stdout" in err) {
@@ -299,20 +324,29 @@ async function runCliOnce(args: string[]): Promise<CliEnvelope | null> {
  * destination).
  */
 async function runCliAsync(args: string[]): Promise<CliEnvelope | null> {
-  return withRetry(() => runCliOnce(args));
+  return withRetry((timeoutMs) => runCliOnce(args, timeoutMs));
 }
 
 /**
  * Retrying CLI runner for the single-request methods (getStatus, verifyOffer,
- * getBookingStatus — all read-only and safe to retry). Throws only when no
- * attempt ever produced a parseable envelope; a well-formed error envelope
- * (even a hard failure like SUBSCRIPTION_REQUIRED) is returned as-is so
- * callers can branch on resp.status / resp.code exactly as before.
+ * getBookingStatus — all read-only and safe to retry, though verifyOffer is
+ * not read-only in its side effects — see the class doc comment below).
+ * Throws only when no attempt ever produced a parseable envelope, and throws
+ * AtlasProviderUnavailableError specifically: "nothing parseable came back
+ * after every retry" is exactly the same "we don't know, not a no" fact as
+ * an exhausted retryable_error envelope (see AtlasProviderUnavailableError),
+ * so callers that branch on that type (e.g. flow.ts's reverify) must see it
+ * regardless of which shape the exhaustion took. A well-formed error
+ * envelope (even a hard failure like SUBSCRIPTION_REQUIRED, or an exhausted
+ * retryable_error) is returned as-is so callers can branch on
+ * resp.status / resp.code exactly as before.
  */
 async function runCliRetrying(args: string[]): Promise<CliEnvelope> {
-  const resp = await withRetry(() => runCliOnce(args));
+  const resp = await withRetry((timeoutMs) => runCliOnce(args, timeoutMs));
   if (!resp) {
-    throw new Error(`Atlas CLI failed: no parseable response after ${RETRY_MAX_ATTEMPTS} attempts`);
+    throw new AtlasProviderUnavailableError(
+      `Atlas CLI failed: no parseable response after ${RETRY_MAX_ATTEMPTS} attempts`,
+    );
   }
   return resp;
 }
@@ -418,7 +452,18 @@ export class SkillAtlasAdapter implements AtlasAdapter {
             : blocker
               ? `Atlas Skill · ${blocker}`
               : "Atlas Skill · search only",
-        provenance: { search: "live", ticketing: "live" },
+        // Each capability's provenance reflects what this call actually
+        // proved, not the adapter's aspiration. `auth` is required for a
+        // live search to succeed; `ticketing` is the CLI's own
+        // ticketing_available bit. Reporting "live" for a capability that
+        // verifiably cannot execute a single call (e.g. this account today:
+        // ticketing_available: false, TICKETING_ACTIVATION_REQUIRED) is
+        // exactly the false "live" claim /api/health and /demo exist to
+        // prevent.
+        provenance: {
+          search: auth ? "live" : "unavailable",
+          ticketing: ticketing ? "live" : "unavailable",
+        },
         ticketingBlockedReason: blocker,
       };
     } catch {
@@ -428,7 +473,8 @@ export class SkillAtlasAdapter implements AtlasAdapter {
         environment: this.environment,
         adapter: "skill",
         label: "Atlas Skill · status unavailable",
-        provenance: { search: "live", ticketing: "live" },
+        // The CLI never answered at all — neither capability was proven live.
+        provenance: { search: "unavailable", ticketing: "unavailable" },
       };
     }
   }
@@ -509,7 +555,17 @@ export class SkillAtlasAdapter implements AtlasAdapter {
     const resp = await runCliRetrying(["offer", "verify", "--offer-id", offerId]);
 
     if (resp.status !== "success") {
-      // Surface the CLI code so callers can branch on it (e.g. SUBSCRIPTION_REQUIRED)
+      // An envelope that is still `retryable_error` after every attempt is
+      // the provider not answering, not a terminal refusal — the same
+      // "unknown, not a no" fact as the exhausted-retry case in
+      // runCliRetrying above (both, in fact, mean "we don't know yet").
+      // Callers (flow.ts's reverify) must be able to tell that apart from a
+      // genuine terminal error like SUBSCRIPTION_REQUIRED, which really does
+      // mean "no" and should still stop for a human decision with its real
+      // reason. Surface the CLI code either way so the message stays honest.
+      if (resp.status === "retryable_error") {
+        throw new AtlasProviderUnavailableError(`${resp.code}: ${resp.message}`);
+      }
       throw new Error(`${resp.code}: ${resp.message}`);
     }
 
@@ -623,7 +679,17 @@ export class SkillAtlasAdapter implements AtlasAdapter {
       return { reference, state: "pending", testMode, rawStatusLabel: "Awaiting airline confirmation" };
     }
 
-    if (resp.code === "ORDER_NOT_FOUND" || resp.status === "error") {
+    // Only an explicit "the order does not exist" is a real failure. `status
+    // === "error"` is the CLI's catch-all bucket for any non-retryable
+    // error — including a transient failure of the status check itself
+    // (e.g. SECURE_STORE_UNAVAILABLE, observed live) that says nothing about
+    // whether the order or ticket exists. Asserting "failed" on that bucket
+    // would be the same false-negative failure mode as calling a 200 OK
+    // "confirmed": real money, a real order in progress, and the UI saying
+    // it never happened. Everything that is not a confirmed state and not an
+    // explicit "not found" is "unknown — ask again", which pollFulfilment's
+    // own catch (a transport-level failure) already handles the same way.
+    if (resp.code === "ORDER_NOT_FOUND") {
       return { reference, state: "failed", testMode, rawStatusLabel: `Status: ${resp.code}` };
     }
 

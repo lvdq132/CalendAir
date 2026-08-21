@@ -73,22 +73,20 @@ export function ModeBadge() {
   const { atlas, scenario } = useSession();
   if (!atlas) return null;
 
-  // Hybrid mixes a live capability (search) with a demo one (ticketing) — it
-  // must never earn the same full "live" green as a mode where everything is
-  // actually live, or the badge itself becomes the dishonest claim.
-  const isHybrid = atlas.adapter === "hybrid";
-  const tone =
-    atlas.adapter === "demo" || (isHybrid && atlas.authorized)
-      ? ""
-      : atlas.authorized
-        ? " ca-mode--live"
-        : " ca-mode--warn";
-  const dot =
-    atlas.adapter === "demo" || (isHybrid && atlas.authorized)
-      ? "var(--ca-gold-500)"
-      : atlas.authorized
-        ? "var(--ca-sage-500)"
-        : "var(--ca-rose-600)";
+  // Any mode that can search but cannot ticket — hybrid always (ticketing is
+  // demo-backed by design), or skill mode while the account's ticketing
+  // entitlement is blocked (TICKETING_ACTIVATION_REQUIRED) — mixes a live
+  // capability with one that verifiably cannot execute a call. It must never
+  // earn the same full "live" green as a mode where everything is actually
+  // live end to end, or the badge itself becomes the dishonest claim.
+  const isPartialLive = atlas.authorized && !atlas.ticketingAvailable;
+  const neutral = atlas.adapter === "demo" || isPartialLive;
+  const tone = neutral ? "" : atlas.authorized ? " ca-mode--live" : " ca-mode--warn";
+  const dot = neutral
+    ? "var(--ca-gold-500)"
+    : atlas.authorized
+      ? "var(--ca-sage-500)"
+      : "var(--ca-rose-600)";
 
   return (
     <Link href="/demo" className={`ca-mode${tone}`}>

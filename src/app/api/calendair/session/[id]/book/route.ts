@@ -12,7 +12,16 @@ export async function POST(_req: Request, ctx: Ctx) {
   if (!session) return NextResponse.json({ error: "Session expired" }, { status: 404 });
 
   const outcome = await book(session, createAtlasAdapter(session.scenario));
-  if (!outcome.ok) return NextResponse.json({ error: outcome.reason }, { status: 409 });
+  if (!outcome.ok) {
+    // The failure reason travels with the session's own state (BOOKING_FAILED
+    // or, when the outcome is genuinely unknown, BOOKING_OUTCOME_UNKNOWN — see
+    // flow.ts's book()) so the client can render the real checkpoint instead
+    // of being left showing whatever screen it was on when the request went out.
+    return NextResponse.json(
+      { error: outcome.reason, state: session.booking.state, booking: session.booking, activity: session.activity },
+      { status: 409 },
+    );
+  }
 
   return NextResponse.json({
     result: outcome.result,

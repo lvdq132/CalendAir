@@ -18,7 +18,7 @@ vi.mock("./skill-adapter", () => ({
       environment: "sandbox",
       adapter: "skill",
       label: "Atlas Skill · TICKETING_ACTIVATION_REQUIRED",
-      provenance: { search: "live", ticketing: "live" },
+      provenance: { search: "live", ticketing: "unavailable" },
       ticketingBlockedReason: "TICKETING_ACTIVATION_REQUIRED",
     }),
     searchFlights: vi.fn(async () => [
@@ -62,6 +62,10 @@ describe("HybridAtlasAdapter — provenance", () => {
             environment: "sandbox",
             adapter: "skill",
             label: "Atlas Skill · not authorized",
+            // Deliberately still "live" here even though the live adapter
+            // isn't authorized, to prove HybridAtlasAdapter.getStatus does
+            // not just pass this through — it must re-derive provenance.search
+            // from live.authorized itself (see hybrid-adapter.ts).
             provenance: { search: "live", ticketing: "live" },
           }),
           searchFlights: vi.fn(),
@@ -71,6 +75,10 @@ describe("HybridAtlasAdapter — provenance", () => {
     const status = await adapter.getStatus();
     expect(status.authorized).toBe(false);
     expect(status.label).toMatch(/not authorized/i);
+    // The bug this guards against: reporting provenance.search: "live" next
+    // to a label reading "search not authorized" contradicts itself in one
+    // object.
+    expect(status.provenance).toEqual({ search: "unavailable", ticketing: "demo" });
   });
 });
 

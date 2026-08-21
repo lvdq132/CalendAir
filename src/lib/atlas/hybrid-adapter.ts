@@ -77,7 +77,12 @@ export class HybridAtlasAdapter implements AtlasAdapter {
       label: live.authorized
         ? "Atlas Hybrid · live search, demo ticketing"
         : "Atlas Hybrid · search not authorized, demo ticketing",
-      provenance: { search: "live", ticketing: "demo" },
+      // Must consult the same fact `label` just did — search is only "live"
+      // when the underlying live adapter is actually authorized. Otherwise
+      // /api/health can report provenance.search: "live" right next to a
+      // label reading "search not authorized", contradicting itself in one
+      // object.
+      provenance: { search: live.authorized ? "live" : "unavailable", ticketing: "demo" },
     };
   }
 

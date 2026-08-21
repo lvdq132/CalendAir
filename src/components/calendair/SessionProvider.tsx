@@ -153,24 +153,32 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       } catch {
         existing = null;
       }
-      if (existing) {
-        const res = await fetch(`/api/calendair/session/${existing}/state`);
-        if (res.ok) {
-          const data = await res.json();
-          setSessionId(existing);
-          setWorld(data.world);
-          setBooking(data.booking);
-          setActivity(data.activity ?? []);
-          setEngine(data.engine ?? null);
-          const health = await fetch("/api/health").then((r) => r.json()).catch(() => null);
-          if (health?.atlas) setAtlas(health.atlas);
-          if (health?.demoScenario) setScenario(health.demoScenario);
-          setReady(true);
-          return;
+      try {
+        if (existing) {
+          const res = await fetch(`/api/calendair/session/${existing}/state`);
+          if (res.ok) {
+            const data = await res.json();
+            setSessionId(existing);
+            setWorld(data.world);
+            setBooking(data.booking);
+            setActivity(data.activity ?? []);
+            setEngine(data.engine ?? null);
+            const health = await fetch("/api/health").then((r) => r.json()).catch(() => null);
+            if (health?.atlas) setAtlas(health.atlas);
+            if (health?.demoScenario) setScenario(health.demoScenario);
+            setReady(true);
+            return;
+          }
         }
+        await start();
+      } catch {
+        // A network-level failure here (fetch() itself rejecting) must not
+        // become an unhandled promise rejection and must not leave the app
+        // stuck on "Reading your calendar…" forever.
+        setError("Could not reach the server. Check your connection and try again.");
+      } finally {
+        setReady(true);
       }
-      await start();
-      setReady(true);
     })();
   }, [start]);
 
@@ -178,14 +186,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     async (path: string, init?: RequestInit) => {
       if (!sessionId) return null;
       setError(null);
-      const res = await fetch(`/api/calendair/session/${sessionId}${path}`, init);
+      // A network-level failure (fetch() itself rejecting — offline, DNS,
+      // the dev server restarting mid-demo) must become an honest, caught
+      // error here, not an unhandled promise rejection that escapes every
+      // caller of scan()/authorize()/book()/pollFulfilment() etc. (several
+      // of which are invoked as `void scan()` or from an interval callback,
+      // with no catch of their own).
+      let res: Response;
+      try {
+        res = await fetch(`/api/calendair/session/${sessionId}${path}`, init);
+      } catch {
+        setError("Could not reach the server. Check your connection and try again.");
+        return null;
+      }
       const data = await res.json().catch(() => null);
+      // Even an error response can carry the session's real state (e.g. a
+      // failed /book call still reports BOOKING_FAILED / BOOKING_OUTCOME_UNKNOWN)
+      // — applying it here is what lets the UI show the true checkpoint
+      // instead of silently freezing on whatever screen was showing before
+      // the request went out.
+      if (data?.activity) setActivity(data.activity);
+      if (data?.booking) setBooking(data.booking);
       if (!res.ok) {
         setError(data?.error ?? "Something went wrong.");
         return null;
       }
-      if (data?.activity) setActivity(data.activity);
-      if (data?.booking) setBooking(data.booking);
       return data;
     },
     [sessionId],
