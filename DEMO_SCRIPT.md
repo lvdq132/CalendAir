@@ -9,6 +9,20 @@ camera. If a profile was set up on this browser, `/settings` will say “Your pr
 profile and use the prepared traveller* to get the numbers below back. `/onboarding` is worth thirty
 seconds of its own if there is room: it is where the hard rules in this script come from.
 
+### The deterministic path is the judged one, on purpose
+
+This script runs entirely on deterministic demo data (`ATLAS_INTEGRATION_MODE` unset) — reliable on
+stage beats impressive-but-flaky, and every screen already says so (the mode badge, `/demo`,
+`/api/health`). **Do not run the judged recording against live Atlas search.**
+
+To show live Atlas search separately — as a technical proof, not as the main run — set
+`ATLAS_INTEGRATION_MODE=hybrid` in `.env.local` (needs `atlas-flight auth login` once on the host)
+and restart. The badge changes to `Atlas Hybrid · live search, demo ticketing`, and the home screen's
+searching card says "Searching live inventory" instead of "Searching the prepared inventory" — same
+screens, honestly relabelled for what is actually running. Say plainly if asked: **live search has
+been observed to fail roughly one call in three**, even with the app's built-in retries, which is
+exactly why the scripted run above stays on the deterministic path.
+
 ---
 
 ## 0:00–0:15 · The trigger
@@ -85,8 +99,15 @@ On the trip screen, point at **What the provider returned** and the Sandbox labe
 
 ## 2:25–2:43 · The calendar transforms
 
+On `/trip`, point at the calendar card — it now reads **"The blocks CALENDAIR would write."**
+
 > "Before: sixty-eight hours free. After: the outbound flight, the days in Dubai, the return, and a
-> recovery buffer — written only after confirmation."
+> recovery buffer — generated only after confirmation, and held in this session. There is no Google
+> Calendar connection in this build, and the card says so rather than claiming one."
+
+If a judge's eye catches the wording, that is the point, not a gap to smooth over — say it plainly:
+onboarding offers Google Calendar as a real option, states it needs a one-time authorisation that
+has not happened, and every calendar screen — this one included — says the same thing.
 
 ## 2:43–2:55 · Technical proof
 
@@ -118,3 +139,12 @@ booking state are ordinary code with tests. A model is only used for wording.
 
 **What happens if it goes wrong?** Two bounded replans, each re-evaluated against the same hard
 rules, and then a safe stop with nothing booked and the window left open.
+
+**What if Atlas itself doesn't answer?** That is a different fact from "no flights," and the app
+never blurs the two. A provider outage reaches `PROVIDER_UNAVAILABLE` — retried a few times first,
+then reported as "we couldn't reach the provider," not as an empty market.
+
+**Is any of this connected to my real calendar or a real booking?** No. The calendar is CALENDAIR's
+deterministic prepared world — no Google OAuth exists in this build, and onboarding, `/calendar` and
+`/trip` all say so. Bookings run against Atlas's sandbox; every reference, PNR and ticket is labelled
+a test result and shown verbatim, never upgraded to "confirmed" on the provider's behalf.

@@ -235,6 +235,11 @@ export default function Home() {
 }
 
 function SearchingCard() {
+  // The claim here has to match the adapter actually running, not the
+  // aspiration — see ModeBadge in Screen.tsx for the same rule applied to
+  // the badge. "demo" is deterministic inventory, never live Atlas data.
+  const { atlas } = useSession();
+  const live = atlas?.adapter === "hybrid" || atlas?.adapter === "skill";
   return (
     <Card pad className="ca-rise">
       <div style={{ display: "flex", alignItems: "center", gap: "var(--ca-4)" }}>
@@ -243,9 +248,13 @@ function SearchingCard() {
         </Medallion>
         <div>
           <div className="ca-serif" style={{ fontSize: "var(--ca-t-md)" }}>
-            Searching live inventory
+            {live ? "Searching live inventory" : "Searching the prepared inventory"}
           </div>
-          <span className="ca-label">Reading real routes and fares for your window</span>
+          <span className="ca-label">
+            {live
+              ? "Reading real routes and fares for your window"
+              : "Deterministic demo routes and fares — not live Atlas data"}
+          </span>
         </div>
       </div>
       <div style={{ display: "grid", gap: 8, marginTop: "var(--ca-5)" }}>

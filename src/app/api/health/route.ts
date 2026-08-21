@@ -34,8 +34,14 @@ export async function GET() {
       integrationMode: process.env.ATLAS_INTEGRATION_MODE || "unset",
     },
     calendar: {
-      googleConfigured: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
-      source: process.env.GOOGLE_CLIENT_ID ? "google" : "demo",
+      // No Google OAuth callback route exists anywhere in this build (see
+      // AGENT_HANDOFF.md) — GOOGLE_CLIENT_ID/SECRET being present would not
+      // connect anything, so `source` must never flip to "google" on their
+      // presence alone. That is exactly the kind of blended claim this route
+      // exists to prevent (see the comment above about `credentialsPresent`).
+      googleClientConfigured: Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET),
+      oauthImplemented: false,
+      source: "demo",
     },
     reasoning: {
       configured: Boolean(process.env.ALIBABA_CLOUD_MODEL_STUDIO_API_KEY && process.env.QWEN_MODEL),

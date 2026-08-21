@@ -16,7 +16,7 @@ The CALENDAIR product, mobile-first, end to end.
 | Booking state machine | `src/lib/calendair/flow.ts` | Reverify, price change, bounded replan, assert, write back |
 | Session store | `src/lib/calendair/store.ts` | In-memory, TTL-swept |
 | Demo world | `src/lib/calendair/demo/` | Deterministic calendar, companion, taste, inventory |
-| Provider boundary | `src/lib/atlas/` | Interface, demo adapter, **live SkillAtlasAdapter**, unwired atrip adapter |
+| Provider boundary | `src/lib/atlas/` | Interface, demo adapter, **live SkillAtlasAdapter**, **HybridAtlasAdapter** (live search + demo ticketing), unwired atrip adapter |
 | API | `src/app/api/calendair/…`, `/api/health` | session, scan, authorize, accept-price, book, fulfilment, state |
 | Interface | `src/app/(calendair)/`, `src/components/calendair/` | Nine screens |
 | Onboarding | `src/components/onboarding/` | Eight-step profile wizard at `/onboarding`, plus intro, coach marks, guide, glossary |
@@ -26,10 +26,10 @@ The CALENDAIR product, mobile-first, end to end.
 | Command | Result |
 |---|---|
 | `npm run typecheck` | clean |
-| `npm run lint` | clean |
-| `npm run test` | 60 passed |
+| `npm run lint` | clean (3 pre-existing warnings in `scripts/uat-orders.mjs`, unrelated) |
+| `npm run test` | 87 passed |
 | `npm run test:e2e` | 31 checks passed across all four scenarios |
-| `npm run build` | success, 15 routes |
+| `npm run build` | success, 21 routes |
 
 ## Demo numbers
 
@@ -81,21 +81,37 @@ Read `references/cli-contract.md` before constructing any command, and
 **Current authorization state:** `AUTHORIZED`, `authenticated: true`, `search_available: true`,
 `ticketing_available: false` (`TICKETING_ACTIVATION_REQUIRED`). Complete the remaining activation steps
 at `https://www.atriptech.com/#/workspace` to unlock price verification, order creation, and ticketing.
-With `ATLAS_INTEGRATION_MODE=skill` the live adapter is active; offers currently return
-`price_status: "reference"` and the booking flow correctly stops at `authorize()` until ticketing
-is enabled.
+With `ATLAS_INTEGRATION_MODE=skill` the live adapter is active for every call; offers currently
+return `price_status: "reference"` and the booking flow correctly stops at `authorize()` until
+ticketing is enabled. `ATLAS_INTEGRATION_MODE=hybrid` gets the same live search today without
+waiting on that activation — `verifyOffer` still stops honestly, but for a documented reason
+(`TICKETING_ACTIVATION_REQUIRED`, surfaced as a safe stop) rather than a dead end.
 
 ## Known gaps
 
-- **Ticketing not yet activated.** The adapter is implemented and live. With `ATLAS_INTEGRATION_MODE=skill`,
-  flight search calls the real CLI and returns real offers (currently all `price_status: "reference"`).
-  Full booking requires completing `TICKETING_ACTIVATION_REQUIRED` in the ATRIP workspace. Once active,
-  `bookable: true` offers will flow through `verifyOffer` → `createBooking` → `getBookingStatus`
-  without any code change.
-- Google Calendar OAuth is not wired. `/onboarding` offers it and states on the card that it needs a
-  one-time authorisation from the account owner; until then the calendar layer is the deterministic
-  demo world.
-- Qwen is not called. The provider boundary exists but no explanation call is made yet.
+- **Ticketing not yet activated.** The adapter is implemented and live. With `ATLAS_INTEGRATION_MODE=skill`
+  or `hybrid`, flight search calls the real CLI and returns real offers (currently all
+  `price_status: "reference"`). Full booking requires completing `TICKETING_ACTIVATION_REQUIRED` in
+  the ATRIP workspace. Once active, `bookable: true` offers will flow through `verifyOffer` →
+  `createBooking` → `getBookingStatus` without any code change — `HybridAtlasAdapter` exists
+  specifically so a demo can run against real inventory in the meantime without depending on that
+  activation. See `src/lib/atlas/hybrid-adapter.ts` and the README's Atlas boundary section.
+- **A provider outage is reported as `PROVIDER_UNAVAILABLE`, distinct from `SAFE_STOP`.** This
+  matters: a stage demo that silently turns "Atlas didn't answer" into "no flights found" is telling
+  the audience something false. `searchFlights` retries up to 3 times with backoff first; only a
+  search remains uncaught by `flow.ts`'s existing try/catch pattern (`book()`'s `createBooking` and
+  `pollFulfilment()`'s `getBookingStatus` now share the same pattern — see the resilience tests in
+  `engine.test.ts`, "book() / pollFulfilment() resilience").
+- Google Calendar OAuth is not wired — no `/api/auth/google` route exists anywhere in this build.
+  `/onboarding` offers it and states on the card that it needs a one-time authorisation from the
+  account owner; `/calendar` and `/trip` now say the same thing in their own words, so the claim
+  holds on every screen it reaches, not only the onboarding card. `/api/health`'s `calendar.source`
+  always reports `"demo"` regardless of whether `GOOGLE_CLIENT_ID`/`SECRET` are set, because setting
+  those two variables alone would not connect anything.
+- Qwen **is** called — `src/lib/llm/qwen.ts` and `/api/.../explain` are implemented and wired into
+  `/opportunity/[id]`. It only degrades to the deterministic reasons because
+  `ALIBABA_CLOUD_MODEL_STUDIO_API_KEY`/`QWEN_MODEL` are unset in this environment; nothing about the
+  call path itself is unfinished.
 - `/settings` shows the live profile and routes back into onboarding to change it. Editing an
   individual field in place is not implemented; answering the questions again is the path.
 - `npm run test:e2e` drives the HTTP API rather than a browser. A Playwright pass over the UI would

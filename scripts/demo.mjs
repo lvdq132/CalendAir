@@ -17,10 +17,13 @@ env.ATLAS_ENV ??= "sandbox";
 const port = env.PORT ?? "3000";
 const mode = (env.ATLAS_INTEGRATION_MODE ?? "").trim().toLowerCase();
 const provider =
-  mode === "skill" || mode === "atrip"
-    ? `Atlas ${mode.toUpperCase()} selected — the adapter must be implemented from the ` +
-      `installed Skill or the ATRIP interface. Search will fail loudly rather than fall back.`
-    : "Deterministic demo inventory — NOT live Atlas data.";
+  mode === "hybrid"
+    ? "Atlas HYBRID — live search, demo ticketing (search is genuinely live; verify/book/status " +
+      "are deterministic because ticketing activation is still pending on this account)."
+    : mode === "skill" || mode === "atrip"
+      ? `Atlas ${mode.toUpperCase()} selected — the adapter must be implemented from the ` +
+        `installed Skill or the ATRIP interface. Search will fail loudly rather than fall back.`
+      : "Deterministic demo inventory — NOT live Atlas data.";
 
 const line = "─".repeat(64);
 console.log(`\n${line}`);

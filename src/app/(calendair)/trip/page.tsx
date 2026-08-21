@@ -117,11 +117,11 @@ export default function TripScreen() {
             </Medallion>
             <div style={{ minWidth: 0 }}>
               <div className="ca-serif" style={{ fontSize: "var(--ca-t-md)" }}>
-                {blocks.length ? "Your trip is on the calendar" : "Calendar not written yet"}
+                {blocks.length ? "The blocks CALENDAIR would write" : "Calendar not written yet"}
               </div>
               <span className="ca-label">
                 {blocks.length
-                  ? "Added after fulfilment was confirmed"
+                  ? "Generated after fulfilment was confirmed · held in this session, no external calendar connected"
                   : "Nothing is written before the provider confirms"}
               </span>
             </div>

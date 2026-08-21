@@ -4,7 +4,7 @@ import { companionOverlap, runOpportunityEngine } from "./engine";
 import { DemoAtlasAdapter } from "@/lib/atlas/demo-adapter";
 import { createAtlasAdapter, AtlasProviderUnavailableError, type AtlasAdapter } from "@/lib/atlas";
 import { createSession } from "./store";
-import { authorize, scan } from "./flow";
+import { authorize, book, pollFulfilment, scan } from "./flow";
 import { checkHardConstraints } from "./constraints";
 import { usefulTimeAtDestination, hoursBetween } from "./time";
 import { demoOffers } from "./demo/inventory";
@@ -344,5 +344,80 @@ describe("provider outage vs genuine no-results (task-2 top-priority fix)", () =
     expect(outcome.kind).toBe("safe-stop");
     expect(outcome.kind === "safe-stop" && outcome.reason).toMatch(/TICKETING_ACTIVATION_REQUIRED/);
     expect(session.booking.state).toBe("SAFE_STOP");
+  });
+});
+
+describe("book() / pollFulfilment() resilience — a provider outage after the checkpoint (task 2)", () => {
+  /**
+   * scan() and reverify() already have an honest answer for "the provider
+   * could not be reached" (PROVIDER_UNAVAILABLE, and a caught throw turned
+   * into a safe stop). book() and pollFulfilment() did not: a throw from
+   * createBooking() or getBookingStatus() propagated straight out of flow.ts
+   * uncaught, which would have surfaced as an unhandled 500 from the
+   * /book and /fulfilment routes instead of a state the traveller can see.
+   * These tests pin the fix.
+   */
+  async function readyForBooking() {
+    const demoAtlas = new DemoAtlasAdapter("perfect");
+    const session = createSession("perfect", NOW);
+    await scan(session, demoAtlas);
+    const hero = session.engine!.recommended!;
+    await authorize(session, demoAtlas, hero.id);
+    expect(session.booking.state).toBe("PRICE_CONFIRMED");
+    return { session, demoAtlas };
+  }
+
+  it("turns a createBooking failure into BOOKING_FAILED instead of throwing", async () => {
+    const { session, demoAtlas } = await readyForBooking();
+    const throwingAtlas: AtlasAdapter = {
+      getStatus: () => demoAtlas.getStatus(),
+      searchFlights: (input) => demoAtlas.searchFlights(input),
+      verifyOffer: (id) => demoAtlas.verifyOffer(id),
+      async createBooking() {
+        // Mirrors what an unreachable atlas-flight CLI looks like: no
+        // parseable response, so the adapter throws rather than returning a
+        // BookingResult (see runCliRetrying in skill-adapter.ts).
+        throw new Error("Atlas CLI failed: no parseable response after 3 attempts");
+      },
+      getBookingStatus: (reference) => demoAtlas.getBookingStatus(reference),
+    };
+
+    const outcome = await book(session, throwingAtlas);
+
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.reason).toMatch(/no parseable response/);
+    expect(session.booking.state).toBe("BOOKING_FAILED");
+    // Reported, not swallowed.
+    expect(
+      session.activity.some((a) => a.ok === false && /no parseable response/.test(a.detail)),
+    ).toBe(true);
+  });
+
+  it("keeps polling rather than throwing when getBookingStatus cannot reach the provider", async () => {
+    const { session, demoAtlas } = await readyForBooking();
+    await book(session, demoAtlas);
+    expect(session.booking.state).toBe("BOOKING_PENDING");
+    const reference = session.booking.reference;
+
+    const flakyAtlas: AtlasAdapter = {
+      getStatus: () => demoAtlas.getStatus(),
+      searchFlights: (input) => demoAtlas.searchFlights(input),
+      verifyOffer: (id) => demoAtlas.verifyOffer(id),
+      createBooking: (input) => demoAtlas.createBooking(input),
+      async getBookingStatus() {
+        throw new Error("Atlas CLI failed: no parseable response after 3 attempts");
+      },
+    };
+
+    const outcome = await pollFulfilment(session, flakyAtlas);
+
+    // "We don't know yet" — not confirmed, not failed, not crashed.
+    expect(outcome.state).toBe("BOOKING_PENDING");
+    expect(session.booking.state).toBe("BOOKING_PENDING");
+    expect(session.booking.reference).toBe(reference);
+    expect(session.booking.calendarBlocks).toBeUndefined();
+    expect(
+      session.activity.some((a) => a.ok === false && /no parseable response/.test(a.detail)),
+    ).toBe(true);
   });
 });

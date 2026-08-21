@@ -11,6 +11,7 @@ import {
   Check,
   Lock,
   Plane,
+  Refresh,
   Shield,
   ShieldCheck,
   Star,
@@ -21,6 +22,9 @@ import {
 import { duration, localDate, localTime, money, placeName } from "@/components/calendair/format";
 import { minutesBetween } from "@/lib/calendair/time";
 import type { BookingState } from "@/lib/calendair/types";
+
+/** ~48s of checking at 1.2s per attempt — long enough for every real scenario, bounded so "pending" never spins forever. */
+const MAX_POLL_ATTEMPTS = 40;
 
 /**
  * The checkpoints.
@@ -34,7 +38,10 @@ export default function BookingScreen() {
   const { ready, world, booking, acceptPrice, book, pollFulfilment, authorize, outcome, busy, error } =
     useSession();
   const [polling, setPolling] = useState(false);
+  const [pollExhausted, setPollExhausted] = useState(false);
   const pollRef = useRef<number | null>(null);
+  const attemptsRef = useRef(0);
+  const [resumeKey, setResumeKey] = useState(0);
 
   const state = booking.state;
   const verified = booking.verified;
@@ -45,20 +52,33 @@ export default function BookingScreen() {
   }, []);
 
   // Ticketing is asked about, never assumed. The poll stops the moment the
-  // provider gives a state of its own.
+  // provider gives a state of its own — and it is bounded, because a demo
+  // that spins on an interval forever is its own kind of dishonesty. The
+  // "pending" rehearsal scenario deliberately never confirms; after
+  // MAX_POLL_ATTEMPTS this says so instead of polling silently through the
+  // rest of the demo. "Check again" resumes deliberately, on request.
   useEffect(() => {
     if (state !== "BOOKING_PENDING" || pollRef.current) return;
     setPolling(true);
+    setPollExhausted(false);
+    attemptsRef.current = 0;
     pollRef.current = window.setInterval(async () => {
+      attemptsRef.current += 1;
       const next = await pollFulfilment();
       if (next && next !== "BOOKING_PENDING") {
         stop();
         setPolling(false);
         if (next === "COMPLETE") router.push("/trip");
+        return;
+      }
+      if (attemptsRef.current >= MAX_POLL_ATTEMPTS) {
+        stop();
+        setPolling(false);
+        setPollExhausted(true);
       }
     }, 1200);
     return stop;
-  }, [state, pollFulfilment, router, stop]);
+  }, [state, pollFulfilment, router, stop, resumeKey]);
 
   useEffect(() => {
     if (state === "COMPLETE") router.replace("/trip");
@@ -129,7 +149,11 @@ export default function BookingScreen() {
                   {booking.result?.rawStatusLabel ?? "Booking requested"}
                 </div>
                 <span className="ca-label">
-                  {polling ? "Asking the provider what actually happened…" : "Awaiting confirmation"}
+                  {pollExhausted
+                    ? "Stopped checking automatically"
+                    : polling
+                      ? "Asking the provider what actually happened…"
+                      : "Awaiting confirmation"}
                 </span>
               </div>
             </div>
@@ -139,8 +163,30 @@ export default function BookingScreen() {
             </p>
             {booking.reference && (
               <p className="ca-label ca-num" style={{ marginTop: "var(--ca-2)" }}>
-                Reference {booking.reference}
+                Reference {booking.reference} <span style={{ opacity: 0.6 }}>· sandbox</span>
               </p>
+            )}
+            {pollExhausted && (
+              <div
+                style={{
+                  marginTop: "var(--ca-4)",
+                  paddingTop: "var(--ca-4)",
+                  borderTop: "1px solid var(--ca-line-soft)",
+                }}
+              >
+                <p className="ca-label">
+                  Real fulfilment can take longer than this. Rather than poll indefinitely, the agent
+                  stopped after a minute of checking — nothing here has changed, and nothing was lost.
+                </p>
+                <button
+                  type="button"
+                  className="ca-btn ca-btn--quiet"
+                  style={{ marginTop: "var(--ca-3)" }}
+                  onClick={() => setResumeKey((k) => k + 1)}
+                >
+                  <Refresh size={15} /> Check again
+                </button>
+              </div>
             )}
           </Card>
         )}
@@ -251,8 +297,8 @@ const STEPS: { state: BookingState[]; title: string; detail: string }[] = [
   },
   {
     state: ["CALENDAR_UPDATED", "COMPLETE"],
-    title: "Writing your calendar",
-    detail: "Flights, the days away and a recovery buffer",
+    title: "Generating your calendar blocks",
+    detail: "Flights, the days away and a recovery buffer — held in this session, not an external calendar",
   },
 ];
 

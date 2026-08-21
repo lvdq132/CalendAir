@@ -90,17 +90,16 @@ export default function DemoScreen() {
               <KV k="Ticketing blocked reason" v={atlas.ticketingBlockedReason} />
             )}
             <KV k="Integration mode" v={String((health?.atlas as Record<string, unknown>)?.integrationMode ?? "…")} />
-            <KV k="Demo mode" v={demoMode} />
+            <KV k="Demo mode (display only)" v={demoMode} />
             <KV k="Max replans" v={String(health?.maxReplans ?? "…")} />
             <KV k="Session" v={sessionId ?? "…"} />
           </div>
-          {atlas?.adapter === "demo" && (
-            <p className="ca-label" style={{ marginTop: "var(--ca-4)" }}>
-              Deterministic inventory. Set <code>ATLAS_INTEGRATION_MODE</code> once the real adapter
-              is implemented — the app refuses to substitute this data for a live call rather than
-              falling back quietly.
-            </p>
-          )}
+          <p className="ca-label" style={{ marginTop: "var(--ca-4)" }}>
+            <code>ATLAS_INTEGRATION_MODE</code> is the only switch that changes what Atlas actually
+            does — <code>DEMO_MODE</code> above is a label this console prints, not a behaviour
+            switch. {atlas?.adapter === "demo" &&
+              "Deterministic inventory here; the app refuses to substitute this data for a live call rather than falling back quietly."}
+          </p>
         </Card>
 
         <Card pad>

@@ -40,9 +40,15 @@ mode it is actually running against before the server starts.
 | `npm run demo` | Start with the recommended `hybrid` demo scenario |
 | `npm run demo:visual` | Deterministic everything, for UI rehearsal only |
 | `npm run validate` | Typecheck, lint and unit tests |
-| `npm run test` | Unit tests, including the acceptance criteria |
-| `npm run test:e2e` | Drives the whole agent loop over the real HTTP API, in all four scenarios |
+| `npm run test` | Unit tests, including the acceptance criteria — 87 passing |
+| `npm run test:e2e` | Drives the whole agent loop over the real HTTP API, in all four scenarios — 31 checks |
 | `npm run build` | Production build |
+
+`npm run demo` sets `DEMO_MODE=hybrid`, which is a **display label for the calendar side only** —
+it does not touch Atlas. Whether flight search is live or deterministic is a separate switch,
+`ATLAS_INTEGRATION_MODE`, read straight from `.env.local` (see **Live Atlas search, on purpose** below).
+The two happen to share the word "hybrid" and mean different things; `/demo` prints both, labelled,
+so this is never ambiguous on screen.
 
 ## The demo path
 
@@ -88,6 +94,10 @@ These are the product, not a disclaimer. Each one is covered by a test.
 | A stated preference cannot widen a hard rule | `src/lib/calendair/profile.ts` |
 | A budget is only compared once both sides are in the same currency | `src/lib/calendair/money.ts` |
 | No titles, tokens or document numbers reach the activity log | `store.ts`, `/activity` |
+| A provider outage (`PROVIDER_UNAVAILABLE`) is never reported as "no flights" (`SAFE_STOP`) | `flow.ts`, `skill-adapter.ts`, `/` |
+| `order create` is never retried — a duplicate booking is worse than one honest failure | `skill-adapter.ts` |
+| A `createBooking`/`getBookingStatus` throw is a reported state, never an unhandled 500 | `flow.ts` |
+| The client stops polling fulfilment after a bound instead of spinning forever | `/booking` |
 
 ## Architecture
 
@@ -106,8 +116,9 @@ Opportunity Engine ──► hard constraints ──► Escape Score ──► o
 
 - **`src/lib/calendair/`** — types, deterministic time arithmetic, constraints, scoring, the
   opportunity engine, the booking state machine, and the demo world.
-- **`src/lib/atlas/`** — the provider boundary. One interface; a deterministic demo adapter; and an
-  unwired live adapter that refuses rather than pretends.
+- **`src/lib/atlas/`** — the provider boundary. One interface, four adapters: deterministic demo,
+  live skill (real `atlas-flight` CLI), hybrid (live search, demo ticketing), and an unwired
+  placeholder for `atrip` that refuses rather than pretends.
 - **`src/components/calendair/`** — the interface, rebuilt from the brand system rather than copied
   from the design PNGs.
 - **`src/components/onboarding/`** — the profile wizard at `/onboarding`, the first-run introduction,
@@ -128,13 +139,43 @@ becomes a promise.
 getStatus() · searchFlights() · verifyOffer() · createBooking() · getBookingStatus()
 ```
 
-Leaving `ATLAS_INTEGRATION_MODE` unset selects deterministic demo inventory, and every screen says
-so. Setting it to `skill` or `atrip` selects a live adapter that **must be implemented from the
-installed Atlas Flight Booking Skill or the ATRIP interface issued to the account** — no endpoint is
-guessed here, and the app will fail loudly rather than substitute demo data for a live call.
+`ATLAS_INTEGRATION_MODE` picks the adapter, and every screen says which one is running — the badge
+on the home screen, `/demo`, and `/api/health`:
+
+| Mode | Search | Verify / book / status | Honest status right now |
+|---|---|---|---|
+| *(unset, the default)* | Deterministic demo | Deterministic demo | Nothing is live. This is what the judged demo runs on. |
+| `skill` | **Live** `atlas-flight` CLI | Live CLI | Search works. Ticketing is blocked for this account (`TICKETING_ACTIVATION_REQUIRED`), so `verifyOffer` and everything after it fails until activation completes at atriptech.com. |
+| `hybrid` | **Live** CLI | Deterministic demo | Composes the two adapters above: real inventory for search, demo ticketing because the account can't ticket yet. Never falls back to demo search on a live failure — see below. |
+| `atrip` | — | — | Placeholder. Fails loudly; nothing is implemented. |
+
+Two things worth being precise about, because they are exactly the kind of distinction a stage demo
+is tempted to blur:
+
+- **`PROVIDER_UNAVAILABLE` is not `SAFE_STOP`.** A transient Atlas outage ("we couldn't reach the
+  provider") and a genuine empty market ("we looked, and nothing qualifies") are different facts.
+  `searchFlights` retries up to 3 times with backoff before giving up, and only then throws
+  `AtlasProviderUnavailableError` — which the UI renders as *"We couldn't reach the flight
+  provider… this is not a statement about availability"*, never as "no flights."
+- **`order create` is the one call that is never retried.** Every other Atlas call is safe to retry
+  (`getStatus`, `searchFlights`, `verifyOffer`, `getBookingStatus` are all read-only). Booking is
+  not idempotent — retrying it on a transient failure risks a duplicate order, which this product
+  must never do by accident. A `createBooking` failure is surfaced once, as a reported
+  `BOOKING_FAILED` state the traveller can see, not a silent retry loop and not an unhandled crash.
 
 The flight-layer guide inside the app (`?` → *The flight layer*) covers authorisation, the Sandbox
 rehearsal, reference-versus-bookable offers, and why a Sandbox ticket is a test result.
+
+### Seeing live Atlas search versus the deterministic demo
+
+The judged run is deterministic on purpose — reliable on stage beats impressive-but-flaky. To show
+real inventory instead, set `ATLAS_INTEGRATION_MODE=hybrid` in `.env.local` (requires
+`atlas-flight auth login` once on the host) and restart. The mode badge and `/demo` will say
+`Atlas Hybrid · live search, demo ticketing`, and the home screen's searching card says "Searching
+live inventory" instead of "Searching the prepared inventory" — the copy always matches the adapter
+actually running. **Live search has been observed to fail roughly one call in three** even with
+retries (a real, current limitation of the account/CLI, not a bug in this app) — that flakiness is
+exactly why the default, judged path stays on deterministic demo data.
 
 ## Onboarding
 
@@ -165,6 +206,16 @@ in the top bar.
 
 See `.env.example`. Nothing is required to run the demo. Secrets are server-only, and `/api/health`
 reports which adapter is live without leaking any of them.
+
+**The calendar is in-memory and fictional, on purpose — there is no Google OAuth in this build.**
+`GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` are read only to decide what `/api/health` reports; no
+`/api/auth/google` route exists, so setting them would not connect anything. Onboarding offers
+"Google Calendar" as a real option in the design, states plainly that it is not connected in this
+build, and every calendar screen — the window at `/calendar`, and the trip's calendar card at
+`/trip` — says the same thing in its own words: this is CALENDAIR's deterministic prepared world,
+and a real connection would read the same way from an actual calendar. The "calendar write" at the
+end of a booking populates an in-memory `calendarBlocks` array on the session, shown as *"the blocks
+CALENDAIR would write,"* never as "added to your calendar."
 
 ## Documents
 

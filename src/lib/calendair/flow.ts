@@ -3,7 +3,7 @@ import { runOpportunityEngine } from "./engine";
 import { activityEvent, pushActivity, type CalendarBlock, type Session } from "./store";
 import { DESTINATION_BY_IATA } from "./destinations";
 import { minutesBetween } from "./time";
-import type { ScoredTrip, VerifiedOffer } from "./types";
+import type { BookingResult, ScoredTrip, VerifiedOffer } from "./types";
 
 /**
  * The booking flow, as a small explicit state machine.
@@ -260,13 +260,25 @@ export async function book(session: Session, atlas: AtlasAdapter) {
   }
 
   session.booking.state = "BOOKING_CREATING";
-  const result = await atlas.createBooking({
-    offer: v,
-    passengerProfileId: session.world.passenger.id,
-    passenger: session.world.passenger,
-    approvedTotal: session.booking.approvedTotal!,
-    approvedCurrency: session.booking.approvedCurrency!,
-  });
+  let result: BookingResult;
+  try {
+    result = await atlas.createBooking({
+      offer: v,
+      passengerProfileId: session.world.passenger.id,
+      passenger: session.world.passenger,
+      approvedTotal: session.booking.approvedTotal!,
+      approvedCurrency: session.booking.approvedCurrency!,
+    });
+  } catch (err) {
+    // Same principle as reverify()'s catch: a provider that cannot be reached
+    // at the moment of the first write is not a silent crash and not a quiet
+    // retry (order create is deliberately never retried — see skill-adapter.ts)
+    // — it is an honest, reported failure the traveller can see and act on.
+    const detail = err instanceof Error ? err.message : "The booking request could not be completed.";
+    session.booking.state = "BOOKING_FAILED";
+    pushActivity(session, activityEvent("ATLAS", "Booking rejected", detail, false));
+    return { ok: false as const, reason: detail };
+  }
   session.booking.result = result;
   session.booking.reference = result.reference;
   session.booking.state = result.state === "failed" ? "BOOKING_FAILED" : "BOOKING_PENDING";
@@ -288,7 +300,19 @@ export async function pollFulfilment(session: Session, atlas: AtlasAdapter) {
   const ref = session.booking.reference;
   if (!ref) return { state: session.booking.state, result: session.booking.result };
 
-  const result = await atlas.getBookingStatus(ref);
+  let result: BookingResult;
+  try {
+    result = await atlas.getBookingStatus(ref);
+  } catch (err) {
+    // A status check that cannot reach the provider is not the same fact as
+    // a booking that failed — it is "we don't know yet, ask again". Stay in
+    // whatever state we were already in (BOOKING_PENDING, typically) rather
+    // than crashing this checkpoint or guessing at an outcome; the next poll
+    // gets another attempt.
+    const detail = err instanceof Error ? err.message : "Could not reach the provider to check fulfilment.";
+    pushActivity(session, activityEvent("ATLAS", "Fulfilment check failed", detail, false));
+    return { state: session.booking.state, result: session.booking.result };
+  }
   session.booking.result = result;
 
   if (result.state === "confirmed" && session.booking.state !== "COMPLETE") {
@@ -303,8 +327,9 @@ export async function pollFulfilment(session: Session, atlas: AtlasAdapter) {
       session,
       activityEvent(
         "CALENDAR",
-        "Calendar updated",
-        `${session.booking.calendarBlocks.length} blocks written after confirmation`,
+        "Calendar blocks generated",
+        `${session.booking.calendarBlocks.length} blocks held in this session after confirmation ` +
+          `· no external calendar is connected in this build`,
       ),
     );
     session.booking.state = "COMPLETE";

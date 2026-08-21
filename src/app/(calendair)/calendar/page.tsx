@@ -77,6 +77,11 @@ export default function CalendarScreen() {
               <span className="ca-muted"> — closes</span>
             </span>
           </div>
+          <p className="ca-label" style={{ marginTop: "var(--ca-3)" }}>
+            Read from CALENDAIR&rsquo;s prepared calendar — deterministic and repeatable, exactly as
+            onboarding said it would be. A real connection would read the same way from your own
+            calendar; none is connected in this build.
+          </p>
         </Card>
 
         {/* Companion overlap */}
