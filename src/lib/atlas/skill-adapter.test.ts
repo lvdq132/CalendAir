@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * These tests mock `node:child_process`'s `execFile` directly — the plain
@@ -251,6 +251,14 @@ describe("SkillAtlasAdapter — provider failure vs genuine no-results (task 2)"
     // destinations below must match skill-adapter.ts's CATALOGUE_IATA as a
     // set (order irrelevant); an unlisted destination gets no queued
     // response and the test fails loudly rather than silently.
+    // This test is specifically about a PARTIAL fan-out across the whole
+    // catalogue, so it opts out of the live destination limit (which otherwise
+    // searches only a bounded prefix — see the "live destination limit"
+    // describe block below). Without this, only three destinations would be
+    // searched and the partial-failure case under test would never arise.
+    const PREV_LIMIT = process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+    process.env.ATLAS_LIVE_DESTINATION_LIMIT = "0";
+    try {
     const NO_RESULTS = { status: "success", code: "SEARCH_NO_RESULTS", data: {} };
     destinationQueues = {
       DXB: [offerEnvelope("OFR-DXB")],
@@ -278,6 +286,10 @@ describe("SkillAtlasAdapter — provider failure vs genuine no-results (task 2)"
     // Every queued response was consumed — proves nothing silently fell back
     // to the shared queue or was left unread.
     expect(Object.values(destinationQueues).every((q) => q.length === 0)).toBe(true);
+    } finally {
+      if (PREV_LIMIT === undefined) delete process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+      else process.env.ATLAS_LIVE_DESTINATION_LIMIT = PREV_LIMIT;
+    }
   }, 15_000);
 });
 
@@ -404,5 +416,62 @@ describe("mapWithConcurrency — the inline concurrency limiter (task 1)", () =>
 
     expect(seen.sort()).toEqual([1, 2, 3]);
     expect(results).toEqual([2, 4, 6]);
+  });
+});
+
+// ─── Live destination limit ───────────────────────────────────────────────────
+//
+// Serialising the fan-out fixed the keychain contention but made a full
+// nine-destination live scan take ~45-51s. A live scan exists to prove the
+// integration is real, not to price the whole catalogue, so it searches a
+// bounded prefix by default. These tests pin that, and pin that an explicitly
+// requested destination is never affected by the limit.
+describe("SkillAtlasAdapter — live destination limit", () => {
+  const ORIGINAL = process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+    else process.env.ATLAS_LIVE_DESTINATION_LIMIT = ORIGINAL;
+  });
+
+  /** Run a catalogue-wide search (no explicit destination) and report which
+   *  destinations the CLI was actually invoked for. */
+  async function destinationsSearched(explicit?: string): Promise<string[]> {
+    // Every destination answers successfully; we only care which were asked.
+    destinationQueues = new Proxy({} as Record<string, QueuedResponse[]>, {
+      get: () => [offerEnvelope("off_x")],
+    });
+    const adapter = new SkillAtlasAdapter("sandbox");
+    const input = { ...searchInput("BCN") } as Record<string, unknown>;
+    if (explicit) input.destination = explicit;
+    else delete input.destination;
+    await adapter.searchFlights(input as never);
+    return execFileCalls
+      .map((a) => destinationArg(a))
+      .filter((d): d is string => Boolean(d));
+  }
+
+  it("searches a bounded prefix of the catalogue by default, not all nine", async () => {
+    delete process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+    const searched = await destinationsSearched();
+    expect(new Set(searched).size).toBe(3);
+  });
+
+  it("searches the whole catalogue when the limit is 0", async () => {
+    process.env.ATLAS_LIVE_DESTINATION_LIMIT = "0";
+    const searched = await destinationsSearched();
+    expect(new Set(searched).size).toBe(9);
+  });
+
+  it("clamps a limit larger than the catalogue", async () => {
+    process.env.ATLAS_LIVE_DESTINATION_LIMIT = "50";
+    const searched = await destinationsSearched();
+    expect(new Set(searched).size).toBe(9);
+  });
+
+  it("ignores the limit when the caller names a destination", async () => {
+    delete process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+    const searched = await destinationsSearched("BCN");
+    expect([...new Set(searched)]).toEqual(["BCN"]);
   });
 });

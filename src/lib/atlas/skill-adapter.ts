@@ -229,6 +229,33 @@ const CATALOGUE_IATA = ["DXB", "NRT", "KIX", "SIN", "JFK", "LIS", "NAP", "KEF", 
 const SEARCH_FANOUT_CONCURRENCY = 1;
 
 /**
+ * How many catalogue destinations a LIVE scan searches.
+ *
+ * Serialising the fan-out (above) fixed the keychain contention, but it traded
+ * a few seconds for ~45-51s across all nine destinations, because each CLI
+ * invocation is now strictly sequential. That is too slow to sit through in a
+ * judged demo, and it buys little: the point of a live scan is to prove the
+ * Atlas integration is real, not to exhaustively price every destination in
+ * the catalogue. The deterministic demo adapter remains the path that shows
+ * the full nine-destination comparison instantly.
+ *
+ * So a live scan searches a bounded prefix of the catalogue by default —
+ * roughly 5s per destination. Raise it with ATLAS_LIVE_DESTINATION_LIMIT (0 or
+ * a negative value means "all"), and expect the latency to scale linearly.
+ * A caller that names an explicit destination is unaffected.
+ */
+const DEFAULT_LIVE_DESTINATION_LIMIT = 3;
+
+function liveDestinationLimit(): number {
+  const raw = process.env.ATLAS_LIVE_DESTINATION_LIMIT;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_LIVE_DESTINATION_LIMIT;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_LIVE_DESTINATION_LIMIT;
+  // 0 or negative means "search the whole catalogue".
+  return parsed <= 0 ? CATALOGUE_IATA.length : Math.min(parsed, CATALOGUE_IATA.length);
+}
+
+/**
  * Run `fn` over `items`, at most `limit` in flight at once, preserving
  * output order. Written inline rather than adding a dependency for one
  * small utility — this is the entire implementation: a fixed pool of
@@ -603,7 +630,9 @@ export class SkillAtlasAdapter implements AtlasAdapter {
     // A specific destination still goes through the same retrying runner as
     // the full fan-out — a single-destination request that flakes deserves
     // the same bounded retry as any other, not a silent zero-result.
-    const destinations: string[] = input.destination ? [input.destination] : [...CATALOGUE_IATA];
+    const destinations: string[] = input.destination
+      ? [input.destination]
+      : [...CATALOGUE_IATA].slice(0, liveDestinationLimit());
     const responses = await mapWithConcurrency(destinations, SEARCH_FANOUT_CONCURRENCY, (dest) =>
       runCliAsync(buildArgs(dest)),
     );
