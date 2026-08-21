@@ -16,6 +16,21 @@ const PORT = process.env.E2E_PORT ?? "3123";
 const BASE = process.env.BASE_URL ?? `http://localhost:${PORT}`;
 const OWNED = !process.env.BASE_URL;
 
+/**
+ * Explicit, not implicit (task 6): this script used to never set
+ * ATLAS_INTEGRATION_MODE at all, so it ran against whatever the ambient
+ * environment happened to have — normally the deterministic demo adapter,
+ * silently. That's a fine default, but a demo-adapter run must never be
+ * mistakable for proof that live Atlas search works: the mode is resolved
+ * once, right here, passed explicitly into the spawned server's env (rather
+ * than left to inherit ambiently), and printed before anything else runs.
+ * Override with `ATLAS_INTEGRATION_MODE=hybrid npm run test:e2e` (requires
+ * `atlas-flight auth login` on this host — see README's "Atlas cannot run
+ * in any deployed runtime") to exercise live search instead.
+ */
+const ATLAS_MODE = (process.env.ATLAS_INTEGRATION_MODE ?? "").trim().toLowerCase();
+const ATLAS_MODE_LABEL = ATLAS_MODE || "unset (deterministic demo adapter)";
+
 let server;
 let failures = 0;
 
@@ -167,16 +182,31 @@ async function scenarioPending() {
   check("no calendar was written", !final.booking.calendarBlocks);
 }
 
+console.log("=".repeat(64));
+console.log("CALENDAIR end-to-end check");
+console.log(`  ATLAS_INTEGRATION_MODE: ${ATLAS_MODE_LABEL}`);
+console.log(`  target: ${OWNED ? `spawning a dev server on ${PORT}` : BASE}`);
+console.log("=".repeat(64));
+
+let resolvedAdapter = "unknown";
+
 try {
   if (OWNED) {
-    console.log(`Starting a dev server on ${PORT}…`);
     server = spawn("npx", ["next", "dev", "-p", PORT], {
       stdio: ["ignore", "ignore", "inherit"],
-      env: { ...process.env, DEMO_MODE: "hybrid" },
+      // Passed explicitly from the resolved ATLAS_MODE above, not left to
+      // ambient inheritance — see the header comment on ATLAS_MODE.
+      env: { ...process.env, DEMO_MODE: "hybrid", ATLAS_INTEGRATION_MODE: ATLAS_MODE },
     });
   }
   const health = await waitForHealth();
-  console.log(`Health: ${health.service} · atlas adapter "${health.atlas.adapter}"`);
+  resolvedAdapter = health.atlas.adapter;
+  console.log(`Health: ${health.service} · atlas adapter "${resolvedAdapter}" · integrationMode "${health.atlas.integrationMode}"`);
+  if (OWNED && (ATLAS_MODE || "unset") !== health.atlas.integrationMode) {
+    console.log(
+      `  ⚠ requested "${ATLAS_MODE || "unset"}" but the running server reports "${health.atlas.integrationMode}" — check for a stale process on port ${PORT}.`,
+    );
+  }
 
   await scenarioPerfect();
   await scenarioPriceChange();
@@ -190,4 +220,12 @@ try {
 }
 
 console.log(failures === 0 ? "\nAll end-to-end checks passed.\n" : `\n${failures} check(s) failed.\n`);
+console.log(
+  `Provider exercised: adapter "${resolvedAdapter}" (ATLAS_INTEGRATION_MODE=${ATLAS_MODE_LABEL}). ` +
+    (resolvedAdapter === "demo"
+      ? "This ran on deterministic demo data — it is NOT proof that live Atlas search works."
+      : resolvedAdapter === "skill" || resolvedAdapter === "hybrid"
+        ? "This exercised the real atlas-flight CLI for search."
+        : "Unrecognised adapter — treat as not proof of anything about live Atlas search."),
+);
 process.exit(failures === 0 ? 0 : 1);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAtlasAdapter } from "@/lib/atlas";
-import { getSession } from "@/lib/calendair/store";
+import { getSession, saveSession } from "@/lib/calendair/store";
 import { pollFulfilment } from "@/lib/calendair/flow";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -12,6 +12,7 @@ export async function GET(_req: Request, ctx: Ctx) {
   if (!session) return NextResponse.json({ error: "Session expired" }, { status: 404 });
 
   const outcome = await pollFulfilment(session, createAtlasAdapter(session.scenario));
+  saveSession(session);
   return NextResponse.json({
     ...outcome,
     booking: session.booking,

@@ -71,7 +71,7 @@ vi.mock("node:child_process", () => ({
   spawnSync: vi.fn(),
 }));
 
-const { SkillAtlasAdapter } = await import("./skill-adapter");
+const { SkillAtlasAdapter, mapWithConcurrency } = await import("./skill-adapter");
 const { AtlasProviderUnavailableError } = await import("./adapter");
 
 function searchInput(destination: string) {
@@ -151,23 +151,54 @@ describe("SkillAtlasAdapter — retry with backoff (task 1)", () => {
     expect(execFileCalls).toHaveLength(3);
   }, 10_000);
 
-  it("does NOT retry a terminal, explicitly non-retryable error (e.g. SECURE_STORE_UNAVAILABLE)", async () => {
+  it("does NOT retry a terminal, explicitly non-retryable error that isn't the local-contention special case (e.g. SUBSCRIPTION_REQUIRED)", async () => {
     queue.push(
-      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "secure store unavailable", retryable: false },
+      { status: "error", code: "SUBSCRIPTION_REQUIRED", message: "Ticketing is not active for this account", retryable: false },
       offerEnvelope("OFR-SHOULD-NOT-BE-REACHED"),
     );
     const adapter = new SkillAtlasAdapter("sandbox");
 
     // A single unresolved destination with zero offers still surfaces as a
     // provider-unavailable outcome (see searchFlights) — what this test
-    // actually pins is that the CLI's own retryable:false was honoured:
-    // only one attempt was made, and the second queued response (which
-    // would have produced a real offer) was never consumed.
+    // actually pins is that the CLI's own retryable:false was honoured for a
+    // code that is NOT SECURE_STORE_UNAVAILABLE: only one attempt was made,
+    // and the second queued response (which would have produced a real
+    // offer) was never consumed. Blanket-retrying every terminal code would
+    // be exactly the "second-guessing the provider" this adapter otherwise
+    // refuses to do.
     await expect(adapter.searchFlights(searchInput("BCN"))).rejects.toBeInstanceOf(
       AtlasProviderUnavailableError,
     );
     expect(execFileCalls).toHaveLength(1);
   });
+
+  it("DOES retry SECURE_STORE_UNAVAILABLE despite retryable:false — the one deliberate override, because it is measured local keychain contention, not a real terminal refusal (task 1)", async () => {
+    queue.push(
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "secure store unavailable", retryable: false },
+      offerEnvelope("OFR-RECOVERED"),
+    );
+    const adapter = new SkillAtlasAdapter("sandbox");
+
+    const offers = await adapter.searchFlights(searchInput("BCN"));
+
+    expect(offers).toHaveLength(1);
+    expect(offers[0].id).toBe("OFR-RECOVERED");
+    expect(execFileCalls).toHaveLength(2); // 1 failed attempt + 1 successful retry
+
+    execFileCalls.length = 0;
+    queue = [
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "secure store unavailable", retryable: false },
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "secure store unavailable", retryable: false },
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "secure store unavailable", retryable: false },
+    ];
+    const adapter2 = new SkillAtlasAdapter("sandbox");
+    // Still bounded by RETRY_MAX_ATTEMPTS — a special case for the CODE,
+    // never an unbounded retry loop.
+    await expect(adapter2.searchFlights(searchInput("BCN"))).rejects.toBeInstanceOf(
+      AtlasProviderUnavailableError,
+    );
+    expect(execFileCalls).toHaveLength(3);
+  }, 10_000);
 
   it("also retries a bare process-level failure (no parseable JSON at all)", async () => {
     queue.push({ processFailure: true }, offerEnvelope("OFR-2"));
@@ -252,15 +283,17 @@ describe("SkillAtlasAdapter — provider failure vs genuine no-results (task 2)"
 
 describe("SkillAtlasAdapter — getBookingStatus (FIX 2: a transient status-check error is not a booking failure)", () => {
   it('a "status":"error" response that is NOT ORDER_NOT_FOUND is reported as pending/unknown, never "failed"', async () => {
-    // SECURE_STORE_UNAVAILABLE, observed live: the CLI's catch-all bucket for
+    // A generic member of the CLI's catch-all "status":"error" bucket for
     // any non-retryable error, including a transient failure of the status
     // check itself. It says nothing about whether the order/ticket exists —
     // asserting "failed" here would be a real order silently reported as
-    // never having happened.
+    // never having happened. (SECURE_STORE_UNAVAILABLE specifically is
+    // covered by its own test below, since — unlike this generic code — it
+    // is now retried; see LOCALLY_RETRYABLE_CODES in skill-adapter.ts.)
     queue.push({
       status: "error",
-      code: "SECURE_STORE_UNAVAILABLE",
-      message: "Secure store unavailable",
+      code: "UPSTREAM_SERVICE_ERROR",
+      message: "Unexpected upstream error",
     });
     const adapter = new SkillAtlasAdapter("sandbox");
 
@@ -268,7 +301,23 @@ describe("SkillAtlasAdapter — getBookingStatus (FIX 2: a transient status-chec
 
     expect(result.state).not.toBe("failed");
     expect(result.state).toBe("pending");
+    expect(execFileCalls).toHaveLength(1); // not retried — a genuinely terminal, non-special-cased code
   });
+
+  it("SECURE_STORE_UNAVAILABLE is retried here too (same override as the search fan-out), and still reports pending — never failed — if every attempt exhausts", async () => {
+    queue.push(
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "Secure store unavailable" },
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "Secure store unavailable" },
+      { status: "error", code: "SECURE_STORE_UNAVAILABLE", message: "Secure store unavailable" },
+    );
+    const adapter = new SkillAtlasAdapter("sandbox");
+
+    const result = await adapter.getBookingStatus("ORDER-456");
+
+    expect(result.state).not.toBe("failed");
+    expect(result.state).toBe("pending");
+    expect(execFileCalls).toHaveLength(3); // bounded by RETRY_MAX_ATTEMPTS, not open-ended
+  }, 10_000);
 
   it("ORDER_NOT_FOUND is still reported as failed — the one legitimate terminal-failure signal", async () => {
     queue.push({ status: "error", code: "ORDER_NOT_FOUND", message: "No such order" });
@@ -299,4 +348,61 @@ describe("SkillAtlasAdapter — getStatus retry and provenance", () => {
     expect(status.provenance).toEqual({ search: "live", ticketing: "unavailable" });
     expect(execFileCalls).toHaveLength(2);
   }, 10_000);
+});
+
+describe("mapWithConcurrency — the inline concurrency limiter (task 1)", () => {
+  it("never runs more than `limit` calls concurrently", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const items = [15, 5, 15, 5, 15, 5];
+
+    await mapWithConcurrency(items, 2, async (ms) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, ms));
+      inFlight -= 1;
+      return ms;
+    });
+
+    expect(maxInFlight).toBeLessThanOrEqual(2);
+  });
+
+  it("with limit=1 — the SEARCH_FANOUT_CONCURRENCY searchFlights actually uses — runs strictly one at a time, never overlapping", async () => {
+    let inFlight = 0;
+    let sawOverlap = false;
+    const items = [5, 5, 5, 5];
+
+    await mapWithConcurrency(items, 1, async (ms) => {
+      inFlight += 1;
+      if (inFlight > 1) sawOverlap = true;
+      await new Promise((r) => setTimeout(r, ms));
+      inFlight -= 1;
+    });
+
+    expect(sawOverlap).toBe(false);
+  });
+
+  it("preserves output order regardless of completion order", async () => {
+    const items = [30, 10, 20];
+
+    const results = await mapWithConcurrency(items, 3, async (ms) => {
+      await new Promise((r) => setTimeout(r, ms));
+      return ms;
+    });
+
+    expect(results).toEqual([30, 10, 20]);
+  });
+
+  it("processes every item exactly once, even when limit exceeds the item count", async () => {
+    const items = [1, 2, 3];
+    const seen: number[] = [];
+
+    const results = await mapWithConcurrency(items, 10, async (n) => {
+      seen.push(n);
+      return n * 2;
+    });
+
+    expect(seen.sort()).toEqual([1, 2, 3]);
+    expect(results).toEqual([2, 4, 6]);
+  });
 });

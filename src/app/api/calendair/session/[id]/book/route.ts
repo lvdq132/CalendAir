@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAtlasAdapter } from "@/lib/atlas";
-import { getSession } from "@/lib/calendair/store";
+import { getSession, saveSession } from "@/lib/calendair/store";
 import { book } from "@/lib/calendair/flow";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -12,6 +12,7 @@ export async function POST(_req: Request, ctx: Ctx) {
   if (!session) return NextResponse.json({ error: "Session expired" }, { status: 404 });
 
   const outcome = await book(session, createAtlasAdapter(session.scenario));
+  saveSession(session);
   if (!outcome.ok) {
     // The failure reason travels with the session's own state (BOOKING_FAILED
     // or, when the outcome is genuinely unknown, BOOKING_OUTCOME_UNKNOWN — see

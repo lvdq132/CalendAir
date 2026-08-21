@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getSession } from "@/lib/calendair/store";
+import { getSession, saveSession } from "@/lib/calendair/store";
 import { acceptPrice } from "@/lib/calendair/flow";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -11,5 +11,6 @@ export async function POST(_req: Request, ctx: Ctx) {
   if (!session) return NextResponse.json({ error: "Session expired" }, { status: 404 });
 
   const outcome = acceptPrice(session);
+  saveSession(session);
   return NextResponse.json({ outcome, state: session.booking.state, booking: session.booking, activity: session.activity });
 }

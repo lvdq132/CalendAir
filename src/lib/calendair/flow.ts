@@ -205,16 +205,25 @@ async function reverify(
     };
   }
 
-  // Gone. Replan once, within budget, and stop for a decision.
-  session.booking.replans += 1;
+  // Gone. Replan within budget, then stop for a decision.
+  //
+  // The bound check runs BEFORE the increment, not after. The previous code
+  // incremented first and then checked `replans > MAX_REPLANS`, which let the
+  // counter reach MAX_REPLANS + 1 before the comparison caught it — with the
+  // documented default of 2, that silently permitted a third replan while the
+  // "limit of 2" message it showed the traveller stayed the same. Checking
+  // first keeps `session.booking.replans` from ever exceeding MAX_REPLANS,
+  // which is what MAX_REPLANS's name, .env.example, AGENTS.md and the
+  // "n of MAX_REPLANS" counter on /booking already document it to mean:
+  // MAX_REPLANS=2 grants exactly two replans, never three.
   session.booking.state = "SOLD_OUT";
-
-  if (session.booking.replans > MAX_REPLANS) {
+  if (session.booking.replans >= MAX_REPLANS) {
     return safeStop(
       session,
       `The replan limit of ${MAX_REPLANS} was reached. Nothing was booked and the window stays open.`,
     );
   }
+  session.booking.replans += 1;
 
   const replacement = nextBestCandidate(session, trip.id);
   pushActivity(

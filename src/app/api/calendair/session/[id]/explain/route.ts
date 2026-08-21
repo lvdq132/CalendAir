@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { getSession, activityEvent, pushActivity } from "@/lib/calendair/store";
+import { getSession, activityEvent, pushActivity, saveSession } from "@/lib/calendair/store";
 import { tripById } from "@/lib/calendair/flow";
 import { explainEscape, qwenConfigured } from "@/lib/llm/qwen";
 
@@ -67,6 +67,7 @@ export async function POST(req: Request, ctx: Ctx) {
     );
     // Persist so a page refresh keeps the wording without re-calling the model.
     trip.qwenExplanation = explanation;
+    saveSession(session);
   }
 
   return NextResponse.json({

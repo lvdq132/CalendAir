@@ -27,7 +27,7 @@ The CALENDAIR product, mobile-first, end to end.
 |---|---|
 | `npm run typecheck` | clean |
 | `npm run lint` | clean (3 pre-existing warnings in `scripts/uat-orders.mjs`, unrelated) |
-| `npm run test` | 87 passed |
+| `npm run test` | 107 passed |
 | `npm run test:e2e` | 31 checks passed across all four scenarios |
 | `npm run build` | success, 21 routes |
 
@@ -78,6 +78,14 @@ or booked; a price increase requires fresh explicit acceptance; never retry orde
 Read `references/cli-contract.md` before constructing any command, and
 `references/error-handling.md` for every non-success code.
 
+**This cannot run in a deployed environment.** The CLI's credential lives in this host's OS
+keyring, established through an interactive browser login (`atlas-flight auth login`) that must
+happen on the exact machine doing the searching — there is no API key, no file to mount, and no
+headless auth mode, and the Skill contract requires operating through this CLI only. Live Atlas
+search therefore only works on a machine a human has authorized directly. See README's "Atlas
+cannot run in any deployed runtime" and `/api/health`'s `atlas.host` block, which reports the CLI's
+real presence/version/authorization on whatever host actually answers the request.
+
 **Current authorization state:** `AUTHORIZED`, `authenticated: true`, `search_available: true`,
 `ticketing_available: false` (`TICKETING_ACTIVATION_REQUIRED`). Complete the remaining activation steps
 at `https://www.atriptech.com/#/workspace` to unlock price verification, order creation, and ticketing.
@@ -122,7 +130,10 @@ past it — not an end-to-end rehearsal. See the README's Atlas boundary section
   individual field in place is not implemented; answering the questions again is the path.
 - `npm run test:e2e` drives the HTTP API rather than a browser. A Playwright pass over the UI would
   be the next addition. The wizard has been smoke-tested manually in a browser.
-- Sessions are in memory and do not survive a server restart, which is fine for a stage demo.
+- Sessions are in memory as the fast path, now backed by a small JSON snapshot on disk
+  (`src/lib/calendair/store.ts`, gitignored under `/.data/`) written on every mutating request and
+  reloaded on process start, so a restart mid-demo no longer wipes an in-flight session. Still not a
+  database — swap it for one the day session volume or concurrent-writer count needs it.
 - Qoder usage is recorded in `BUILD_EVIDENCE.md`. Keep it truthful; do not claim what was not done.
 
 ## History

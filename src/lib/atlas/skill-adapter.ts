@@ -8,6 +8,18 @@
  * (TICKETING_ACTIVATION_REQUIRED). Offers come back price_status="reference"
  * and are correctly refused by the booking flow without reaching createBooking.
  * Once activation completes, bookable offers will flow through all five methods.
+ *
+ * Measured reliability (see README's "Live Atlas search, measured" and
+ * AGENT_HANDOFF.md — do not restate a single-sample rate here, it will rot):
+ * a 12-call sequential sample returned 12/12 success, and a separate
+ * sequential 9-destination catalogue scan returned 7/9 success with 2
+ * `SERVICE_TEMPORARILY_UNAVAILABLE` from the provider. Separately, and this
+ * is the fix in SEARCH_FANOUT_CONCURRENCY below: running the same 9-destination
+ * scan as `Promise.all` (fully parallel) produced 5/9 `SECURE_STORE_UNAVAILABLE`
+ * failures, twice in a row — that is *our* concurrent-process contention on the
+ * macOS Keychain the CLI reads its token from (see atlas_cli/secure_store.py in
+ * the installed tool), not a provider problem, and it disappears at
+ * concurrency 1.
  */
 
 import { execFile, spawnSync } from "node:child_process";
@@ -114,8 +126,10 @@ interface CliEnvelope {
   details: Record<string, unknown>;
   /**
    * Present on `{status:"retryable_error"}` envelopes, e.g.
-   * `SERVICE_TEMPORARILY_UNAVAILABLE`. Observed live: roughly one call in
-   * three flakes this way and succeeds on a bare retry — see withRetry below.
+   * `SERVICE_TEMPORARILY_UNAVAILABLE`. Observed live, occasionally, and a
+   * bare retry a moment later succeeds — see withRetry below and the measured
+   * rates in this file's header comment. Not a fixed one-in-three rate; that
+   * figure came from a 3-call sample and did not hold up under more calls.
    */
   retryable?: boolean;
 }
@@ -178,9 +192,66 @@ const CLI = resolveAtlasCli();
 
 /**
  * IATA codes of every destination in the product catalogue.
- * Used to fan out a no-destination search across all known targets in parallel.
+ * Used to fan out a no-destination search across all known targets, bounded
+ * by SEARCH_FANOUT_CONCURRENCY below — not truly "in parallel" any more; see
+ * that constant's comment for why.
  */
 const CATALOGUE_IATA = ["DXB", "NRT", "KIX", "SIN", "JFK", "LIS", "NAP", "KEF", "HAV"] as const;
+
+/**
+ * Concurrency cap for the catalogue-wide search fan-out.
+ *
+ * Root cause (confirmed against the real CLI, not guessed): `atlas-flight`
+ * stores its auth token in the OS keyring (macOS Keychain via Python
+ * `keyring` — see `atlas_cli/secure_store.py` in the installed tool).
+ * Launching all 9 catalogue searches at once as concurrent child processes
+ * makes them contend on that keychain read, and some lose and come back
+ * `{status:"terminal_error", code:"SECURE_STORE_UNAVAILABLE", retryable:false}`
+ * — a fact about our own process fan-out, not about flight availability or
+ * the provider.
+ *
+ * Measured against the real CLI, same 9 destinations, same dates, two full
+ * runs at each concurrency level:
+ *
+ *   unbounded (Promise.all)  5/9 and 5/9 SECURE_STORE_UNAVAILABLE
+ *   concurrency 3            1/9 and 1/9
+ *   concurrency 2            1/9 and 1/9
+ *   concurrency 1            0/9 and 0/9   (two more runs, still 0/9 and 0/9)
+ *
+ * Only concurrency 1 was clean across every run tried. The cost is latency:
+ * a full 9-destination scan takes roughly 42-48s sequentially (each
+ * `atlas-flight search` call is itself ~2-20s), versus ~3-8s when it was
+ * silently losing half its destinations to keyring contention. Slower and
+ * correct beats fast and wrong for this product's own safety bar — a scan
+ * that drops 5 of 9 destinations without saying so is exactly the kind of
+ * confident-but-false result CALENDAIR exists not to produce.
+ */
+const SEARCH_FANOUT_CONCURRENCY = 1;
+
+/**
+ * Run `fn` over `items`, at most `limit` in flight at once, preserving
+ * output order. Written inline rather than adding a dependency for one
+ * small utility — this is the entire implementation: a fixed pool of
+ * `limit` workers each pulling the next index off a shared cursor.
+ */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
+}
 
 /**
  * Manual promisification of `execFile`, kept separate from `node:util`'s
@@ -214,14 +285,17 @@ function execFileP(
 /**
  * Bounded retry for the Atlas CLI.
  *
- * Observed live: `atlas-flight search --json` returns
- * `{status:"retryable_error", code:"SERVICE_TEMPORARILY_UNAVAILABLE", retryable:true}`
- * roughly one call in three, and a bare retry a moment later succeeds. A
- * transient provider hiccup and a genuine zero-result answer are different
- * facts and must never collapse into the same "no flights" outcome — see
- * AtlasProviderUnavailableError — so every CLI call gets a bounded number of
- * attempts, with exponential backoff plus jitter, before the caller gives up
- * and reports the failure honestly instead of silently downgrading it.
+ * Observed live: `atlas-flight search --json` occasionally returns
+ * `{status:"retryable_error", code:"SERVICE_TEMPORARILY_UNAVAILABLE", retryable:true}`,
+ * and a bare retry a moment later usually succeeds — see this file's header
+ * comment and README's "Live Atlas search, measured" for the actual sample
+ * sizes (a 12-call sequential run was 12/12, a 9-destination sequential scan
+ * saw 2 of these). A transient provider hiccup and a genuine zero-result
+ * answer are different facts and must never collapse into the same "no
+ * flights" outcome — see AtlasProviderUnavailableError — so every CLI call
+ * gets a bounded number of attempts, with exponential backoff plus jitter,
+ * before the caller gives up and reports the failure honestly instead of
+ * silently downgrading it.
  *
  * Kept as module constants rather than inline numbers so the policy is one
  * place to read, and one place to tune.
@@ -246,9 +320,37 @@ const ATTEMPT_TIMEOUT_MS = 30_000; // ceiling on any single execFile attempt
  */
 const CALL_WALL_CLOCK_BUDGET_MS = 30_000;
 
+/**
+ * The one deliberate override of the CLI's own `retryable` flag.
+ *
+ * Every other terminal code is trusted exactly as the CLI reports it — that
+ * is the whole point of branching on `code`/`retryable` instead of guessing
+ * (see the Skill contract, error-handling.md: "SECURE_STORE_UNAVAILABLE —
+ * report that secure local storage is unavailable and stop"). That guidance
+ * is correct in general: an agent that cannot read this host's keyring at
+ * all has no business retrying.
+ *
+ * But this app confirmed, by direct measurement (see SEARCH_FANOUT_CONCURRENCY
+ * above), that on THIS host `SECURE_STORE_UNAVAILABLE` is not "the keyring is
+ * broken" — it is transient contention from our own concurrent CLI
+ * invocations losing a race on the same macOS Keychain entry. The store is
+ * available; it was momentarily locked by a sibling process. A brief backoff
+ * (the same withRetry policy as any other retryable code, still bounded by
+ * RETRY_MAX_ATTEMPTS) resolves that race, whereas honouring `retryable:false`
+ * here — even after switching the fan-out to concurrency 1 above — would
+ * still fail the odd request that happens to race an auth-status check or a
+ * second adapter instance. No other non-retryable code gets this treatment:
+ * SUBSCRIPTION_REQUIRED, ORDER_NOT_FOUND and everything else terminal stay
+ * exactly as terminal as the CLI says, because those really do mean "no",
+ * not "ask again".
+ */
+const LOCALLY_RETRYABLE_CODES = new Set(["SECURE_STORE_UNAVAILABLE"]);
+
 function isRetryableEnvelope(envelope: CliEnvelope | null): boolean {
   if (!envelope) return true; // no parseable JSON at all — a process-level failure, worth a retry
-  return envelope.retryable === true || envelope.status === "retryable_error";
+  if (envelope.retryable === true || envelope.status === "retryable_error") return true;
+  if (envelope.code && LOCALLY_RETRYABLE_CODES.has(envelope.code)) return true;
+  return false;
 }
 
 function backoffDelayMs(attemptIndex: number): number {
@@ -502,17 +604,19 @@ export class SkillAtlasAdapter implements AtlasAdapter {
     // the full fan-out — a single-destination request that flakes deserves
     // the same bounded retry as any other, not a silent zero-result.
     const destinations: string[] = input.destination ? [input.destination] : [...CATALOGUE_IATA];
-    const responses = await Promise.all(destinations.map((dest) => runCliAsync(buildArgs(dest))));
+    const responses = await mapWithConcurrency(destinations, SEARCH_FANOUT_CONCURRENCY, (dest) =>
+      runCliAsync(buildArgs(dest)),
+    );
 
     const allOffers: NormalizedOffer[] = [];
-    // One entry per destination that never produced a trustworthy answer —
-    // retried up to RETRY_MAX_ATTEMPTS times when the CLI marked the failure
-    // retryable (e.g. SERVICE_TEMPORARILY_UNAVAILABLE), or failed once when
-    // it explicitly didn't (e.g. SECURE_STORE_UNAVAILABLE, observed live
-    // under a concurrent fan-out — the CLI itself says retryable:false, and
-    // withRetry respects that rather than second-guessing the provider) —
-    // as opposed to a destination that cleanly reported SEARCH_NO_RESULTS,
-    // which is a genuine fact, not a failure.
+    // One entry per destination that never produced a trustworthy answer
+    // after up to RETRY_MAX_ATTEMPTS attempts — whether the CLI marked the
+    // failure retryable (e.g. SERVICE_TEMPORARILY_UNAVAILABLE), or it is the
+    // one code this adapter retries despite the CLI saying retryable:false
+    // (SECURE_STORE_UNAVAILABLE — see LOCALLY_RETRYABLE_CODES above), or
+    // every attempt still came back retryable/unresolved past the retry
+    // budget — as opposed to a destination that cleanly reported
+    // SEARCH_NO_RESULTS, which is a genuine fact, not a failure.
     const unresolved: string[] = [];
 
     responses.forEach((resp, i) => {
@@ -695,4 +799,75 @@ export class SkillAtlasAdapter implements AtlasAdapter {
 
     return { reference, state: "pending", testMode, rawStatusLabel: resp.message || "Booking pending" };
   }
+}
+
+// ─── Host-level CLI presence (task 3) ──────────────────────────────────────
+
+export interface AtlasCliHostCheck {
+  /** Whether the `atlas-flight` binary could actually be executed on this host, at all. */
+  present: boolean;
+  /** The resolved path this process would invoke — see resolveAtlasCli() above. */
+  path: string;
+  version: string | null;
+  /** null means "could not be determined" (e.g. the CLI isn't present), never a guessed false. */
+  authorized: boolean | null;
+  ticketingAvailable: boolean | null;
+  checkedAt: string;
+}
+
+/**
+ * Ground truth about the Atlas CLI on THIS host, independent of
+ * `ATLAS_INTEGRATION_MODE`.
+ *
+ * This exists because the mode env var only says which adapter code path is
+ * *selected* — it says nothing about whether the `atlas-flight` binary can
+ * actually run here, or whether it has been through the interactive
+ * `atlas-flight auth login` browser flow on this specific machine (its
+ * credential lives in this host's OS keyring; see skill-adapter.ts's header
+ * comment and the "cannot run in a deployed runtime" section of the README).
+ * A deployed instance with `ATLAS_INTEGRATION_MODE=skill` set but no CLI
+ * installed, or a CLI that has never been authorized on that host, must not
+ * report "configured" — /api/health calls this directly, for every mode,
+ * so that gap can never hide behind a healthy-looking env var.
+ *
+ * Uses only commands the Skill contract explicitly sanctions for this
+ * purpose — `atlas-flight --version` (without `--json`, per the contract)
+ * and `atlas-flight auth status --json` — never a guessed or invented flag.
+ */
+export function checkAtlasCliOnHost(): AtlasCliHostCheck {
+  const checkedAt = new Date().toISOString();
+  const base = { path: CLI, checkedAt };
+
+  let versionResult: ReturnType<typeof spawnSync>;
+  try {
+    // turbopackIgnore: CLI resolves to an on-PATH or fixed-directory binary
+    // at runtime (see resolveAtlasCli() above), never a path inside this
+    // app's own source — it must not make the bundler trace and ship the
+    // whole project as a false-positive "this file might be read".
+    versionResult = spawnSync(/* turbopackIgnore: true */ CLI, ["--version"], { encoding: "utf-8", timeout: 5_000 });
+  } catch {
+    return { ...base, present: false, version: null, authorized: null, ticketingAvailable: null };
+  }
+  if (versionResult.error || versionResult.status !== 0) {
+    return { ...base, present: false, version: null, authorized: null, ticketingAvailable: null };
+  }
+  const version = String(versionResult.stdout || "").trim() || null;
+
+  let authorized: boolean | null = null;
+  let ticketingAvailable: boolean | null = null;
+  try {
+    const authResult = spawnSync(/* turbopackIgnore: true */ CLI, ["auth", "status", "--json"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    const out = String(authResult.stdout || authResult.stderr || "").trim();
+    const env = JSON.parse(out) as CliEnvelope;
+    authorized = Boolean(env.data?.authenticated);
+    ticketingAvailable = Boolean(env.data?.ticketing_available);
+  } catch {
+    // Leave as null — "could not be determined right now" is honest;
+    // guessing `false` would claim a fact this check never established.
+  }
+
+  return { ...base, present: true, version, authorized, ticketingAvailable };
 }

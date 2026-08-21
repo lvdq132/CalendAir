@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createAtlasAdapter, AtlasNotWiredError } from "@/lib/atlas";
-import { getSession } from "@/lib/calendair/store";
+import { getSession, saveSession } from "@/lib/calendair/store";
 import { scan } from "@/lib/calendair/flow";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -13,6 +13,7 @@ export async function POST(_req: Request, ctx: Ctx) {
 
   try {
     const result = await scan(session, createAtlasAdapter(session.scenario));
+    saveSession(session);
     return NextResponse.json({
       state: session.booking.state,
       searchInput: result.searchInput,

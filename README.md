@@ -12,6 +12,32 @@ Built for the **Alibaba Cloud × Atlas Agentic AI Hackathon**.
 
 ---
 
+> ## ⚠ Atlas cannot run in any deployed runtime — this must run locally to show live search
+>
+> This is established, not speculated: the Atlas integration is a **local CLI subprocess**
+> (`atlas-flight`), not an HTTP API. Its auth credential lives in **this host's OS keyring**
+> (macOS Keychain, via Python `keyring` — see `atlas_cli/secure_store.py` in the installed tool) —
+> there is no file to mount, no API key, no client secret, and no headless auth mode. Getting
+> authorized is an **interactive browser flow** (`atlas-flight auth login`) that has to happen on
+> the exact machine that will later run searches. And the official Skill contract is explicit:
+> *"Operate through the Atlas Flight Booking CLI only… do not call services directly"* — there is no
+> sanctioned HTTP transport to build instead, even in principle.
+>
+> **Consequence:** live Atlas search (`ATLAS_INTEGRATION_MODE=skill` or `hybrid`) only ever works on
+> a machine where a human has run `atlas-flight auth login` once, interactively, in a real browser.
+> It cannot work on Vercel, a container, a serverless function, or any other stateless/ephemeral
+> deployed target — there is no credential to give it and no way to complete the login flow
+> non-interactively. `ATLAS_INTEGRATION_MODE` unset (deterministic demo data) is not a stylistic
+> choice for those environments; it is the *only* mode that can run there at all.
+>
+> `/api/health`'s `atlas.host` block reports the truth about the machine it is actually running on
+> — whether the CLI is present, its version, and whether it is authorized **on that host, right
+> now** — independent of which mode is configured, so a deployed instance can never appear
+> configured when it isn't. See "Live Atlas search, measured" below and `checkAtlasCliOnHost()` in
+> `src/lib/atlas/skill-adapter.ts`.
+
+---
+
 ## The idea in one screen
 
 A Friday commitment is released. The gap it leaves runs to Monday morning — 68 hours. Nobody
@@ -40,7 +66,7 @@ mode it is actually running against before the server starts.
 | `npm run demo` | Start with the recommended `hybrid` demo scenario |
 | `npm run demo:visual` | Deterministic everything, for UI rehearsal only |
 | `npm run validate` | Typecheck, lint and unit tests |
-| `npm run test` | Unit tests, including the acceptance criteria — 87 passing |
+| `npm run test` | Unit tests, including the acceptance criteria — 107 passing |
 | `npm run test:e2e` | Drives the whole agent loop over the real HTTP API, in all four scenarios — 31 checks |
 | `npm run build` | Production build |
 
@@ -186,9 +212,33 @@ real inventory instead, set `ATLAS_INTEGRATION_MODE=hybrid` in `.env.local` (req
 `atlas-flight auth login` once on the host) and restart. The mode badge and `/demo` will say
 `Atlas Hybrid · live search, demo ticketing`, and the home screen's searching card says "Searching
 live inventory" instead of "Searching the prepared inventory" — the copy always matches the adapter
-actually running. **Live search has been observed to fail roughly one call in three** even with
-retries (a real, current limitation of the account/CLI, not a bug in this app) — that flakiness is
-exactly why the default, judged path stays on deterministic demo data.
+actually running.
+
+#### Live Atlas search, measured
+
+An earlier version of this document claimed live search "has been observed to fail roughly one
+call in three." That number came from a 3-call sample and did not hold up: a later 12-call
+sequential run returned 12/12 success. Here is what was actually measured, with sample sizes, so
+this doesn't rot into folklore again:
+
+| What was run | Result |
+|---|---|
+| 12 sequential single-destination search calls | 12/12 succeeded |
+| 9-destination catalogue scan, sequential (one call at a time) | 7/9 succeeded; 2 destinations returned the provider's own `SERVICE_TEMPORARILY_UNAVAILABLE` — a genuine, occasional transient error this app's existing retry policy already covers |
+| The same 9-destination scan, fully parallel (`Promise.all`, the code as it shipped before this fix) | 5/9 failed with `SECURE_STORE_UNAVAILABLE`, in two separate full runs |
+
+That third row was the real bug, and it was ours, not Atlas's: `atlas-flight` stores its auth token
+in the OS keychain, and launching all 9 searches as concurrent child processes made them contend on
+that keychain read. Fanning the scan out with an unbounded `Promise.all` was misdiagnosed as
+"live search is flaky" when it was actually "this app was asking the CLI to do something it can't do
+concurrently." `searchFlights` in `skill-adapter.ts` now bounds that fan-out to one CLI call at a
+time (`SEARCH_FANOUT_CONCURRENCY`, chosen from a measured sweep of concurrency 1/2/3 — see that
+file's comment), which measured 0/9 `SECURE_STORE_UNAVAILABLE` across four separate runs. The trade
+is latency: a full 9-destination scan now takes roughly 42-48 seconds sequentially, versus 3-8
+seconds when it was silently dropping half the destinations. That latency — not a fabricated flake
+rate — is the honest reason the judged, on-stage path stays on deterministic demo data: an
+unpredictable 40-second wait is worse on stage than instant, reliable demo inventory, independent of
+how reliable the provider itself turns out to be.
 
 ## Onboarding
 

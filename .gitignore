@@ -38,6 +38,10 @@ yarn-error.log*
 # vercel
 .vercel
 
+# CALENDAIR durable session store (task 5) — live session state, not source.
+# See src/lib/calendair/store.ts.
+/.data/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

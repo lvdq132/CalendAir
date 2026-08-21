@@ -19,9 +19,15 @@ To show live Atlas search separately — as a technical proof, not as the main r
 `ATLAS_INTEGRATION_MODE=hybrid` in `.env.local` (needs `atlas-flight auth login` once on the host)
 and restart. The badge changes to `Atlas Hybrid · live search, demo ticketing`, and the home screen's
 searching card says "Searching live inventory" instead of "Searching the prepared inventory" — same
-screens, honestly relabelled for what is actually running. Say plainly if asked: **live search has
-been observed to fail roughly one call in three**, even with the app's built-in retries, which is
-exactly why the scripted run above stays on the deterministic path.
+screens, honestly relabelled for what is actually running. Say plainly if asked: live search is
+**reasonably reliable but slow** — a 12-call sequential sample came back 12/12 successful, a
+9-destination sequential scan came back 7/9 (2 genuine `SERVICE_TEMPORARILY_UNAVAILABLE` from the
+provider, both retried automatically), and a full catalogue scan takes roughly 40-50 seconds because
+each destination is now searched one at a time, not in parallel (see README's "Live Atlas search,
+measured" for why: it's a keychain-contention fix, not a workaround for provider flakiness). That
+latency, not a made-up flake rate — an earlier draft of this script claimed "roughly one call in
+three," which a 3-call sample never actually supported — is why the scripted run above stays on the
+deterministic path.
 
 ---
 

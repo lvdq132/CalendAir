@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createAtlasAdapter } from "@/lib/atlas";
-import { getSession } from "@/lib/calendair/store";
+import { getSession, saveSession } from "@/lib/calendair/store";
 import { authorize } from "@/lib/calendair/flow";
 
 const Body = z.object({ tripId: z.string().min(1) });
@@ -20,5 +20,6 @@ export async function POST(req: Request, ctx: Ctx) {
   if (!parsed.success) return NextResponse.json({ error: "tripId required" }, { status: 400 });
 
   const outcome = await authorize(session, createAtlasAdapter(session.scenario), parsed.data.tripId);
+  saveSession(session);
   return NextResponse.json({ outcome, state: session.booking.state, booking: session.booking, activity: session.activity });
 }
