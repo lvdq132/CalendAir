@@ -166,3 +166,39 @@ describe("flow.book — FIX 3: an unanswered order create is an unknown outcome,
     expect(session.booking.reference).toBeUndefined();
   });
 });
+
+// A session restored after a restart has no traveller document by design: the
+// snapshot withholds it rather than masking it, because skill-adapter submits
+// passenger.documentNumber verbatim to `atlas-flight order create`. book() must
+// refuse rather than send a placeholder to the provider.
+describe("flow.book — a restored session cannot book without its document", () => {
+  async function atConfirmedPrice() {
+    const { session, trip } = await sessionWithRecommendation();
+    const confirmed: VerifiedOffer = {
+      ...trip,
+      bookable: true,
+      totalPrice: trip.totalPrice,
+      verifiedAtIso: new Date().toISOString(),
+    };
+    await authorize(session, stubAtlas({ verifyOffer: async () => confirmed }), trip.id);
+    expect(session.booking.state).toBe("PRICE_CONFIRMED");
+    return session;
+  }
+
+  it("refuses when documentNeedsReentry is set, even at a confirmed price", async () => {
+    const session = await atConfirmedPrice();
+    session.documentNeedsReentry = true;
+    const outcome = await book(session, stubAtlas({}));
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.reason).toMatch(/restored|document/i);
+    expect(session.booking.state).toBe("PRICE_CONFIRMED"); // never advanced
+  });
+
+  it("refuses when the document is empty for any reason", async () => {
+    const session = await atConfirmedPrice();
+    session.world.passenger.documentNumber = "";
+    const outcome = await book(session, stubAtlas({}));
+    expect(outcome.ok).toBe(false);
+    expect(session.booking.state).toBe("PRICE_CONFIRMED");
+  });
+});

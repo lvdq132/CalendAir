@@ -91,7 +91,29 @@ describe("durable session store — restart survives (task 5)", () => {
 
     const raw = readFileSync(storePath, "utf-8");
     expect(raw).not.toContain("E12345678");
-    expect(raw).toContain("••"); // masked, same convention as the API's own response masking
+    // Deliberately NOT masked. A mask is fine for display, but this file is
+    // read back into live session state and skill-adapter sends
+    // passenger.documentNumber verbatim to `atlas-flight order create`, so a
+    // masked value on disk would be submitted to the provider as if it were
+    // real -- and session/route.ts masks again on the way out, so nobody would
+    // see it. The field is withheld instead.
+    expect(raw).not.toContain("••");
+    expect(raw).toContain("__withheld__");
+  });
+
+  it("restores with an empty document and flags that it must be re-entered", async () => {
+    const store1 = await import("./store");
+    const session = store1.createSession("perfect");
+    session.world.passenger.documentNumber = "E12345678";
+    store1.saveSession(session);
+    const id = session.id;
+
+    vi.resetModules();
+    const store2 = await import("./store");
+    const restored = store2.getSession(id);
+    expect(restored).toBeTruthy();
+    expect(restored!.world.passenger.documentNumber).toBe("");
+    expect(restored!.documentNeedsReentry).toBe(true);
   });
 
   it("a corrupt snapshot on disk does not crash startup — the new instance just starts empty", async () => {

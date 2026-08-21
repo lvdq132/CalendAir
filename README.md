@@ -66,7 +66,7 @@ mode it is actually running against before the server starts.
 | `npm run demo` | Start with the recommended `hybrid` demo scenario |
 | `npm run demo:visual` | Deterministic everything, for UI rehearsal only |
 | `npm run validate` | Typecheck, lint and unit tests |
-| `npm run test` | Unit tests, including the acceptance criteria — 107 passing |
+| `npm run test` | Unit tests, including the acceptance criteria — 114 passing |
 | `npm run test:e2e` | Drives the whole agent loop over the real HTTP API, in all four scenarios — 31 checks |
 | `npm run build` | Production build |
 
@@ -233,12 +233,23 @@ that keychain read. Fanning the scan out with an unbounded `Promise.all` was mis
 "live search is flaky" when it was actually "this app was asking the CLI to do something it can't do
 concurrently." `searchFlights` in `skill-adapter.ts` now bounds that fan-out to one CLI call at a
 time (`SEARCH_FANOUT_CONCURRENCY`, chosen from a measured sweep of concurrency 1/2/3 — see that
-file's comment), which measured 0/9 `SECURE_STORE_UNAVAILABLE` across four separate runs. The trade
-is latency: a full 9-destination scan now takes roughly 42-48 seconds sequentially, versus 3-8
-seconds when it was silently dropping half the destinations. That latency — not a fabricated flake
-rate — is the honest reason the judged, on-stage path stays on deterministic demo data: an
-unpredictable 40-second wait is worse on stage than instant, reliable demo inventory, independent of
-how reliable the provider itself turns out to be.
+file's comment), which measured 0/9 `SECURE_STORE_UNAVAILABLE` across four separate runs.
+
+Serialising costs latency, so a live scan also searches a bounded prefix of the catalogue rather
+than all nine destinations — `ATLAS_LIVE_DESTINATION_LIMIT`, default 3, where 0 means all nine.
+Measured end to end through `/scan`:
+
+| Destinations searched | Keychain failures | Scan latency |
+|---|---|---|
+| 9, unbounded fan-out (before) | 5/9 | 3-8s, but mostly failing |
+| 9, serialised | 0/9 | 45-51s |
+| **3, serialised (default)** | **0/9** | **8-14s** |
+
+A live scan exists to prove the Atlas integration is real, not to price the whole catalogue — the
+deterministic demo adapter still shows the full nine-destination comparison instantly. The judged,
+on-stage path therefore stays on demo inventory for pace and repeatability, and the live scan is the
+"this is really Atlas" moment beside it. That is a latency decision, not a claim about provider
+reliability.
 
 ## Onboarding
 

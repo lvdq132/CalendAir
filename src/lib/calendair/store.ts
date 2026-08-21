@@ -51,13 +51,44 @@ const TTL_MS = 2 * 60 * 60 * 1000;
  * in the OS keyring (see skill-adapter.ts), never in application state — so
  * this one mask is the whole job.
  */
+/**
+ * Marks a snapshot whose document number was dropped, so a reload knows the
+ * difference between "this traveller has no document on file" and "we
+ * deliberately did not write it to disk".
+ */
+const DOCUMENT_WITHHELD = "__withheld__" as const;
+
 function redactForDisk(session: Session): Session {
   const clone: Session = JSON.parse(JSON.stringify(session));
   const num = clone.world?.passenger?.documentNumber;
   if (typeof num === "string" && num.length > 0) {
-    clone.world.passenger.documentNumber = num.length > 2 ? `••••••${num.slice(-2)}` : "••••••";
+    // Drop it entirely rather than writing a masked form of it.
+    //
+    // A mask like ••••••78 is fine for display, but this file is read back
+    // into live session state, and skill-adapter.ts sends
+    // passenger.documentNumber verbatim to `atlas-flight order create`. So a
+    // masked value on disk means a restarted session would submit •'s to the
+    // provider as if they were a real document -- and session/route.ts masks
+    // again on the way out, so the corruption would be invisible in the UI.
+    // Withhold it, and make the restored session say so.
+    clone.world.passenger.documentNumber = DOCUMENT_WITHHELD;
   }
   return clone;
+}
+
+/**
+ * Undo the withholding on load. The document cannot be recovered from disk by
+ * design, so the restored session carries an empty document and a flag that
+ * the booking path checks -- a restored session must re-collect it before it
+ * can create an order, rather than silently booking with a placeholder.
+ */
+function restoreFromDisk(session: Session): Session {
+  const passenger = session.world?.passenger;
+  if (passenger && passenger.documentNumber === DOCUMENT_WITHHELD) {
+    passenger.documentNumber = "";
+    session.documentNeedsReentry = true;
+  }
+  return session;
 }
 
 function loadFromDisk(): Map<string, Session> {
@@ -73,7 +104,12 @@ function loadFromDisk(): Map<string, Session> {
     // Do not resurrect anything already past its TTL — a snapshot written
     // hours ago should not un-expire a session sweep() would otherwise have
     // dropped.
-    return new Map(parsed.filter((s) => s.touchedAt >= cutoff).map((s) => [s.id, s]));
+    return new Map(
+      parsed
+        .filter((s) => s.touchedAt >= cutoff)
+        .map((s) => restoreFromDisk(s))
+        .map((s) => [s.id, s]),
+    );
   } catch {
     // A missing, corrupt or unreadable snapshot must never crash startup —
     // start empty, exactly like a first boot. This is a durability upgrade
@@ -133,6 +169,13 @@ export interface Session {
   engine?: EngineResult;
   booking: BookingRun;
   activity: AgentActivity[];
+  /**
+   * Set only on a session restored from disk whose traveller document was
+   * withheld from the snapshot. The booking path must re-collect the document
+   * before creating an order — a restored session must never submit a
+   * placeholder to the provider as if it were real. See redactForDisk.
+   */
+  documentNeedsReentry?: boolean;
 }
 
 // Hydrated once, at module init, from whatever the last process (or this

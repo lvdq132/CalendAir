@@ -293,6 +293,18 @@ export async function book(session: Session, atlas: AtlasAdapter) {
   if (v.totalPrice !== session.booking.approvedTotal) {
     return { ok: false as const, reason: "The approved total no longer matches the verified fare." };
   }
+  // A session restored from disk deliberately does not carry the traveller's
+  // document number — it is withheld from the snapshot rather than masked,
+  // because the adapter sends this field verbatim to the provider and a masked
+  // value would be submitted as if it were real. Refuse rather than book with
+  // a placeholder.
+  if (session.documentNeedsReentry || !session.world?.passenger?.documentNumber) {
+    return {
+      ok: false as const,
+      reason:
+        "This session was restored after a restart, so the traveller's document is not on file. Re-enter it before booking.",
+    };
+  }
 
   session.booking.state = "BOOKING_CREATING";
   let result: BookingResult;
