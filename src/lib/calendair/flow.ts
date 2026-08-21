@@ -3,7 +3,7 @@ import { runOpportunityEngine } from "./engine";
 import { activityEvent, pushActivity, type CalendarBlock, type Session } from "./store";
 import { DESTINATION_BY_IATA } from "./destinations";
 import { minutesBetween } from "./time";
-import type { ScoredTrip } from "./types";
+import type { ScoredTrip, VerifiedOffer } from "./types";
 
 /**
  * The booking flow, as a small explicit state machine.
@@ -29,6 +29,25 @@ export async function scan(session: Session, atlas: AtlasAdapter) {
   });
   session.engine = result;
   pushActivity(session, ...result.activity);
+
+  if (result.providerUnavailable) {
+    // A provider outage and a genuine empty market are different facts and
+    // must never produce the same state. SAFE_STOP means "we looked, and
+    // nothing qualifies"; PROVIDER_UNAVAILABLE means "we don't know yet" —
+    // see EngineResult.providerUnavailable / AtlasProviderUnavailableError.
+    session.booking.state = "PROVIDER_UNAVAILABLE";
+    pushActivity(
+      session,
+      activityEvent(
+        "CALENDAIR",
+        "Provider unavailable",
+        "We couldn't reach the flight provider — this is not a statement about availability.",
+        false,
+      ),
+    );
+    return result;
+  }
+
   session.booking.state = result.recommended ? "RECOMMENDATION_READY" : "SAFE_STOP";
   if (!result.recommended) {
     pushActivity(
@@ -102,7 +121,23 @@ async function reverify(
 
   session.booking.state = "REVERIFYING";
   const started = Date.now();
-  const current = await atlas.verifyOffer(trip.id);
+  let current: VerifiedOffer;
+  try {
+    current = await atlas.verifyOffer(trip.id);
+  } catch (err) {
+    // Verification can fail for reasons that are not "the fare is gone" —
+    // ticketing entitlement blocked (SUBSCRIPTION_REQUIRED in skill mode), or
+    // in hybrid mode a live offer id the demo ticketing adapter was never
+    // going to recognise (see HybridAtlasAdapter.verifyOffer). Either way we
+    // do not fabricate a verified price and we do not crash the checkpoint —
+    // report the real reason and stop for a human decision.
+    const detail = err instanceof Error ? err.message : "This fare could not be verified.";
+    pushActivity(
+      session,
+      activityEvent("ATLAS", "Rechecking live fare", detail, false, Date.now() - started),
+    );
+    return safeStop(session, detail);
+  }
   pushActivity(
     session,
     activityEvent(

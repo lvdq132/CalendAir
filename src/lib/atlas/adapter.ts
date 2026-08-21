@@ -41,6 +41,25 @@ export class AtlasNotWiredError extends Error {
 }
 
 /**
+ * Thrown by `searchFlights` when the provider could not be reached at all —
+ * not "zero flights", but "we don't know" — after a bounded number of
+ * retries (see RETRY_MAX_ATTEMPTS in skill-adapter.ts) were exhausted.
+ *
+ * This is the fix for the exact failure this adapter boundary exists to
+ * prevent: a transient `SERVICE_TEMPORARILY_UNAVAILABLE` from the Atlas CLI
+ * must never be silently converted into "no viable flights found". A caller
+ * catching this must report an honest provider-unavailable outcome (see
+ * BookingState "PROVIDER_UNAVAILABLE" in calendair/types.ts) and must not
+ * treat it the same as a clean empty result.
+ */
+export class AtlasProviderUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AtlasProviderUnavailableError";
+  }
+}
+
+/**
  * A live-mode placeholder that refuses rather than pretends.
  *
  * If someone sets ATLAS_INTEGRATION_MODE without wiring the real client, every
@@ -60,6 +79,7 @@ export class UnwiredAtlasAdapter implements AtlasAdapter {
       environment: this.environment,
       adapter: this.mode,
       label: `Atlas ${this.mode.toUpperCase()} selected · adapter not wired`,
+      provenance: { search: "unavailable", ticketing: "unavailable" },
     };
   }
 

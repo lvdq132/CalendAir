@@ -73,22 +73,26 @@ export function ModeBadge() {
   const { atlas, scenario } = useSession();
   if (!atlas) return null;
 
+  // Hybrid mixes a live capability (search) with a demo one (ticketing) — it
+  // must never earn the same full "live" green as a mode where everything is
+  // actually live, or the badge itself becomes the dishonest claim.
+  const isHybrid = atlas.adapter === "hybrid";
   const tone =
-    atlas.adapter === "demo" ? "" : atlas.authorized ? " ca-mode--live" : " ca-mode--warn";
+    atlas.adapter === "demo" || (isHybrid && atlas.authorized)
+      ? ""
+      : atlas.authorized
+        ? " ca-mode--live"
+        : " ca-mode--warn";
+  const dot =
+    atlas.adapter === "demo" || (isHybrid && atlas.authorized)
+      ? "var(--ca-gold-500)"
+      : atlas.authorized
+        ? "var(--ca-sage-500)"
+        : "var(--ca-rose-600)";
 
   return (
     <Link href="/demo" className={`ca-mode${tone}`}>
-      <span
-        className="ca-dot"
-        style={{
-          background:
-            atlas.adapter === "demo"
-              ? "var(--ca-gold-500)"
-              : atlas.authorized
-                ? "var(--ca-sage-500)"
-                : "var(--ca-rose-600)",
-        }}
-      />
+      <span className="ca-dot" style={{ background: dot }} />
       {atlas.label}
       <span style={{ opacity: 0.55 }}>· {scenario}</span>
     </Link>

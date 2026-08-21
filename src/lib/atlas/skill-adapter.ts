@@ -10,12 +10,12 @@
  * Once activation completes, bookable offers will flow through all five methods.
  */
 
-import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { promisify } from "node:util";
 import type { AtlasAdapter } from "./adapter";
+import { AtlasProviderUnavailableError } from "./adapter";
 import type {
   AtlasAccountStatus,
   BookingInput,
@@ -112,6 +112,12 @@ interface CliEnvelope {
   message: string;
   data: Record<string, unknown>;
   details: Record<string, unknown>;
+  /**
+   * Present on `{status:"retryable_error"}` envelopes, e.g.
+   * `SERVICE_TEMPORARILY_UNAVAILABLE`. Observed live: roughly one call in
+   * three flakes this way and succeeds on a bare retry — see withRetry below.
+   */
+  retryable?: boolean;
 }
 
 // ─── Offer normalizer ─────────────────────────────────────────────────────────
@@ -176,57 +182,150 @@ const CLI = resolveAtlasCli();
  */
 const CATALOGUE_IATA = ["DXB", "NRT", "KIX", "SIN", "JFK", "LIS", "NAP", "KEF", "HAV"] as const;
 
-const execFileAsync = promisify(execFile);
+/**
+ * Manual promisification of `execFile`, kept separate from `node:util`'s
+ * `promisify` on purpose: `execFile` carries a special
+ * `util.promisify.custom` implementation that resolves `{ stdout, stderr }`,
+ * which a test double for the plain callback-style import would also have to
+ * replicate. Hand-rolling this wrapper means a unit test can mock `execFile`
+ * as an ordinary Node-style callback function and nothing more.
+ */
+function execFileP(
+  cmd: string,
+  args: string[],
+  options: { timeout: number },
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { encoding: "utf-8", ...options }, (err, stdout, stderr) => {
+      if (err) {
+        // Node attaches these to exec/execFile errors natively; set them
+        // explicitly too so the behaviour does not depend on that.
+        Object.assign(err, { stdout, stderr });
+        reject(err);
+      } else {
+        resolve({ stdout: String(stdout), stderr: String(stderr) });
+      }
+    });
+  });
+}
+
+// ─── Retry policy ──────────────────────────────────────────────────────────
 
 /**
- * Async CLI runner — used for parallel fan-out searches.
- * Returns null (instead of throwing) so Promise.all can continue if one
- * destination fails.
+ * Bounded retry for the Atlas CLI.
+ *
+ * Observed live: `atlas-flight search --json` returns
+ * `{status:"retryable_error", code:"SERVICE_TEMPORARILY_UNAVAILABLE", retryable:true}`
+ * roughly one call in three, and a bare retry a moment later succeeds. A
+ * transient provider hiccup and a genuine zero-result answer are different
+ * facts and must never collapse into the same "no flights" outcome — see
+ * AtlasProviderUnavailableError — so every CLI call gets a bounded number of
+ * attempts, with exponential backoff plus jitter, before the caller gives up
+ * and reports the failure honestly instead of silently downgrading it.
+ *
+ * Kept as module constants rather than inline numbers so the policy is one
+ * place to read, and one place to tune.
  */
-async function runCliAsync(args: string[]): Promise<CliEnvelope | null> {
+const RETRY_MAX_ATTEMPTS = 3; // total attempts, including the first — not just retries
+const RETRY_BASE_DELAY_MS = 300; // backoff before the 2nd attempt; doubles each attempt after
+const RETRY_MAX_DELAY_MS = 3_000; // backoff never grows past this
+const RETRY_JITTER_MS = 200; // random jitter added to every backoff, so a parallel fan-out doesn't retry in lockstep
+const RETRY_TOTAL_CEILING_MS = 20_000; // cumulative backoff time for one logical call; a flaky provider cannot hang a scan indefinitely
+
+function isRetryableEnvelope(envelope: CliEnvelope | null): boolean {
+  if (!envelope) return true; // no parseable JSON at all — a process-level failure, worth a retry
+  return envelope.retryable === true || envelope.status === "retryable_error";
+}
+
+function backoffDelayMs(attemptIndex: number): number {
+  const exp = Math.min(RETRY_BASE_DELAY_MS * 2 ** attemptIndex, RETRY_MAX_DELAY_MS);
+  return exp + Math.random() * RETRY_JITTER_MS;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Run `attempt()` up to `maxAttempts` times, backing off between retryable
+ * failures (see isRetryableEnvelope). Stops early once
+ * RETRY_TOTAL_CEILING_MS of cumulative backoff has elapsed. Returns whatever
+ * the last attempt produced — success, a non-retryable error envelope
+ * (e.g. SUBSCRIPTION_REQUIRED — retrying that would just waste the ceiling),
+ * a still-retryable envelope if every attempt flaked, or null if no attempt
+ * ever produced parseable JSON.
+ */
+async function withRetry(
+  attempt: () => Promise<CliEnvelope | null>,
+  maxAttempts: number = RETRY_MAX_ATTEMPTS,
+): Promise<CliEnvelope | null> {
+  const startedAt = Date.now();
+  let result = await attempt();
+  let tries = 1;
+  while (isRetryableEnvelope(result) && tries < maxAttempts) {
+    if (Date.now() - startedAt >= RETRY_TOTAL_CEILING_MS) break;
+    await sleep(backoffDelayMs(tries - 1));
+    result = await attempt();
+    tries += 1;
+  }
+  return result;
+}
+
+// ─── CLI runner helpers ───────────────────────────────────────────────────────
+
+/**
+ * One CLI attempt — no retry. Returns null (instead of throwing) on any
+ * process-level failure, so withRetry / Promise.all can treat "no response"
+ * uniformly with a retryable envelope.
+ */
+async function runCliOnce(args: string[]): Promise<CliEnvelope | null> {
   try {
-    const { stdout } = await execFileAsync(CLI, [...args, "--json"], {
-      encoding: "utf-8",
-      timeout: 30_000,
-    });
+    const { stdout } = await execFileP(CLI, [...args, "--json"], { timeout: 30_000 });
     return JSON.parse(stdout) as CliEnvelope;
   } catch (err: unknown) {
     if (err && typeof err === "object" && "stdout" in err) {
       const out = String((err as { stdout?: string }).stdout ?? "").trim();
       if (out) { try { return JSON.parse(out) as CliEnvelope; } catch { /* fall through */ } }
     }
-    return null; // Surface as zero results rather than crashing the scan
+    return null;
   }
 }
 
 /**
- * Run an atlas-flight subcommand and return the parsed JSON envelope.
- * execFileSync avoids shell injection — args are passed as an array.
- * On non-zero exit the CLI still writes JSON to stdout; we recover it from
- * the Error object before re-throwing as a plain Error.
+ * Retrying CLI runner — used for the parallel search fan-out. Returns null
+ * only once every attempt has failed to produce parseable JSON at all;
+ * Promise.all can still continue if one destination is truly unreachable
+ * (see searchFlights, which distinguishes that from a clean zero-result
+ * destination).
  */
-function runCli(args: string[]): CliEnvelope {
-  try {
-    const raw = execFileSync(CLI, [...args, "--json"], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    });
-    return JSON.parse(raw) as CliEnvelope;
-  } catch (err) {
-    if (err && typeof err === "object" && "stdout" in err) {
-      const out = String((err as { stdout?: string }).stdout ?? "").trim();
-      if (out) {
-        try { return JSON.parse(out) as CliEnvelope; } catch { /* fall through */ }
-      }
-    }
-    throw new Error(`Atlas CLI failed: ${err instanceof Error ? err.message : String(err)}`);
+async function runCliAsync(args: string[]): Promise<CliEnvelope | null> {
+  return withRetry(() => runCliOnce(args));
+}
+
+/**
+ * Retrying CLI runner for the single-request methods (getStatus, verifyOffer,
+ * getBookingStatus — all read-only and safe to retry). Throws only when no
+ * attempt ever produced a parseable envelope; a well-formed error envelope
+ * (even a hard failure like SUBSCRIPTION_REQUIRED) is returned as-is so
+ * callers can branch on resp.status / resp.code exactly as before.
+ */
+async function runCliRetrying(args: string[]): Promise<CliEnvelope> {
+  const resp = await withRetry(() => runCliOnce(args));
+  if (!resp) {
+    throw new Error(`Atlas CLI failed: no parseable response after ${RETRY_MAX_ATTEMPTS} attempts`);
   }
+  return resp;
 }
 
 /**
  * Run a CLI command that needs data piped to its standard input.
  * spawnSync feeds the payload without touching shell history or logs.
+ *
+ * Deliberately NOT retried: this is used only by createBooking ("order
+ * create"), which is not idempotent. Blindly retrying a create call on a
+ * transient failure risks creating a duplicate order — the one thing this
+ * product must never do by accident. A failure here is surfaced once, as-is,
+ * and the human checkpoint in flow.ts decides what happens next.
  */
 function runCliWithStdin(args: string[], stdinPayload: string): CliEnvelope {
   const result = spawnSync(CLI, [...args, "--json"], {
@@ -302,11 +401,11 @@ export class SkillAtlasAdapter implements AtlasAdapter {
 
   async getStatus(): Promise<AtlasAccountStatus> {
     try {
-      const resp = runCli(["auth", "status"]);
+      const resp = await runCliRetrying(["auth", "status"]);
       const d = resp.data;
       const auth = Boolean(d.authenticated);
       const ticketing = Boolean(d.ticketing_available);
-      const blocker = typeof d.ticketing_blocker === "string" ? d.ticketing_blocker : null;
+      const blocker = typeof d.ticketing_blocker === "string" ? d.ticketing_blocker : undefined;
       return {
         authorized: auth,
         ticketingAvailable: ticketing,
@@ -319,6 +418,8 @@ export class SkillAtlasAdapter implements AtlasAdapter {
             : blocker
               ? `Atlas Skill · ${blocker}`
               : "Atlas Skill · search only",
+        provenance: { search: "live", ticketing: "live" },
+        ticketingBlockedReason: blocker,
       };
     } catch {
       return {
@@ -327,6 +428,7 @@ export class SkillAtlasAdapter implements AtlasAdapter {
         environment: this.environment,
         adapter: "skill",
         label: "Atlas Skill · status unavailable",
+        provenance: { search: "live", ticketing: "live" },
       };
     }
   }
@@ -350,31 +452,61 @@ export class SkillAtlasAdapter implements AtlasAdapter {
       "--currency", "CNY",
     ];
 
-    // When a specific destination was requested, do a single synchronous call.
-    // When no destination is given (the typical engine call), fan out across the
-    // full catalogue in parallel so the engine can filter and rank across all.
-    const responses: Array<CliEnvelope | null> = input.destination
-      ? [runCli(buildArgs(input.destination))]
-      : await Promise.all(CATALOGUE_IATA.map((d) => runCliAsync(buildArgs(d))));
+    // A specific destination still goes through the same retrying runner as
+    // the full fan-out — a single-destination request that flakes deserves
+    // the same bounded retry as any other, not a silent zero-result.
+    const destinations: string[] = input.destination ? [input.destination] : [...CATALOGUE_IATA];
+    const responses = await Promise.all(destinations.map((dest) => runCliAsync(buildArgs(dest))));
 
     const allOffers: NormalizedOffer[] = [];
-    for (const resp of responses) {
-      if (!resp || resp.code === "SEARCH_NO_RESULTS") continue;
-      if (resp.status !== "success") continue;
-      const raw = (resp.data.offers as CliOffer[] | undefined) ?? [];
-      for (const o of raw) {
-        const norm = normalizeCliOffer(o);
-        this.searchCache.set(o.offer_id, norm); // Cache for verifyOffer reconstruction
-        allOffers.push(norm);
+    // One entry per destination that never produced a trustworthy answer —
+    // retried up to RETRY_MAX_ATTEMPTS times when the CLI marked the failure
+    // retryable (e.g. SERVICE_TEMPORARILY_UNAVAILABLE), or failed once when
+    // it explicitly didn't (e.g. SECURE_STORE_UNAVAILABLE, observed live
+    // under a concurrent fan-out — the CLI itself says retryable:false, and
+    // withRetry respects that rather than second-guessing the provider) —
+    // as opposed to a destination that cleanly reported SEARCH_NO_RESULTS,
+    // which is a genuine fact, not a failure.
+    const unresolved: string[] = [];
+
+    responses.forEach((resp, i) => {
+      const dest = destinations[i];
+      if (resp?.status === "success") {
+        const raw = (resp.data.offers as CliOffer[] | undefined) ?? [];
+        for (const o of raw) {
+          const norm = normalizeCliOffer(o);
+          this.searchCache.set(o.offer_id, norm); // Cache for verifyOffer reconstruction
+          allOffers.push(norm);
+        }
+        return;
       }
+      if (resp?.code === "SEARCH_NO_RESULTS") return; // genuine zero results for this destination
+
+      unresolved.push(
+        resp ? `${dest}: ${resp.code || resp.status} — ${resp.message}` : `${dest}: no response from atlas-flight`,
+      );
+    });
+
+    // Zero offers plus at least one destination we simply could not reach is
+    // a provider outage, not a market with nothing in it — see
+    // AtlasProviderUnavailableError and BookingState "PROVIDER_UNAVAILABLE".
+    // A partial fan-out failure alongside real offers from other
+    // destinations still produces a legitimate (if incomplete) result, so
+    // this only throws when there is nothing at all to show for the search.
+    if (allOffers.length === 0 && unresolved.length > 0) {
+      throw new AtlasProviderUnavailableError(
+        `Atlas search did not return a trustworthy answer for ${unresolved.length} of ` +
+          `${destinations.length} destination(s): ${unresolved.join("; ")}`,
+      );
     }
+
     return allOffers;
   }
 
   // ── verifyOffer ────────────────────────────────────────────────────────────
 
   async verifyOffer(offerId: string): Promise<VerifiedOffer> {
-    const resp = runCli(["offer", "verify", "--offer-id", offerId]);
+    const resp = await runCliRetrying(["offer", "verify", "--offer-id", offerId]);
 
     if (resp.status !== "success") {
       // Surface the CLI code so callers can branch on it (e.g. SUBSCRIPTION_REQUIRED)
@@ -473,7 +605,7 @@ export class SkillAtlasAdapter implements AtlasAdapter {
 
   async getBookingStatus(reference: string): Promise<BookingResult> {
     const testMode = this.environment === "sandbox";
-    const resp = runCli(["order", "status", "--order-no", reference]);
+    const resp = await runCliRetrying(["order", "status", "--order-no", reference]);
     const d = resp.data;
 
     if (resp.code === "TICKETED") {

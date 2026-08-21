@@ -1,10 +1,11 @@
-import type { AtlasAdapter } from "@/lib/atlas";
+import { AtlasProviderUnavailableError, type AtlasAdapter } from "@/lib/atlas";
 import { checkHardConstraints, type ConstraintContext } from "./constraints";
 import { scoreOffer } from "./scoring";
 import type {
   AgentActivity,
   DetectedWindow,
   FlightSearchInput,
+  NormalizedOffer,
   RejectedCandidate,
   ScoredTrip,
   TravelTaste,
@@ -36,6 +37,14 @@ export interface EngineResult {
   activity: AgentActivity[];
   scanned: number;
   constraintsActive: number;
+  /**
+   * True when the provider could not be reached at all — even after retries
+   * — rather than a search that genuinely returned nothing. Never collapse
+   * this into `!recommended`: the two are different facts. See
+   * AtlasProviderUnavailableError and BookingState "PROVIDER_UNAVAILABLE".
+   */
+  providerUnavailable: boolean;
+  providerUnavailableDetail?: string;
 }
 
 let activitySeq = 0;
@@ -129,16 +138,30 @@ export async function runOpportunityEngine(
   );
 
   const started = Date.now();
-  const offers = await atlas.searchFlights(searchInput);
-  activity.push(
-    event(
-      "ATLAS",
-      "Searching live inventory",
-      `${offers.length} itineraries returned for ${searchInput.origin}`,
-      true,
-      Date.now() - started,
-    ),
-  );
+  let offers: NormalizedOffer[] = [];
+  let providerUnavailable = false;
+  let providerUnavailableDetail: string | undefined;
+  try {
+    offers = await atlas.searchFlights(searchInput);
+    activity.push(
+      event(
+        "ATLAS",
+        "Searching live inventory",
+        `${offers.length} itineraries returned for ${searchInput.origin}`,
+        true,
+        Date.now() - started,
+      ),
+    );
+  } catch (err) {
+    if (!(err instanceof AtlasProviderUnavailableError)) throw err;
+    // A provider outage, not a market with nothing in it — see EngineResult
+    // .providerUnavailable. The engine still returns a normal EngineResult
+    // (with zero offers) rather than throwing, so callers get one consistent
+    // shape to read regardless of what happened.
+    providerUnavailable = true;
+    providerUnavailableDetail = err.message;
+    activity.push(event("ATLAS", "Provider unavailable", err.message, false, Date.now() - started));
+  }
 
   const ctx: ConstraintContext = {
     window: input.window,
@@ -184,7 +207,9 @@ export async function runOpportunityEngine(
       "Scoring and ranking",
       recommended
         ? `${recommended.destinationName} leads on ${recommended.escapeScore}`
-        : "No itinerary cleared every hard constraint",
+        : providerUnavailable
+          ? "Skipped — the provider could not be reached"
+          : "No itinerary cleared every hard constraint",
       Boolean(recommended),
     ),
   );
@@ -198,6 +223,8 @@ export async function runOpportunityEngine(
     activity,
     scanned: offers.length,
     constraintsActive: 9,
+    providerUnavailable,
+    providerUnavailableDetail,
   };
 }
 

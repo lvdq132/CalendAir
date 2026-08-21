@@ -28,7 +28,7 @@ import { DESTINATION_BY_IATA, ORIGIN_BY_IATA } from "@/lib/calendair/destination
  * whole premise is that the trip finds you.
  */
 export default function Home() {
-  const { ready, world, engine, scan, scanning, error, atlas } = useSession();
+  const { ready, world, engine, scan, scanning, error, atlas, booking } = useSession();
   const tried = useRef(false);
 
   useEffect(() => {
@@ -165,6 +165,27 @@ export default function Home() {
             <HeroCard trip={hero} />
           ) : scanning ? (
             <SearchingCard />
+          ) : booking.state === "PROVIDER_UNAVAILABLE" ? (
+            <Card pad>
+              <span className="ca-eyebrow">Provider unavailable</span>
+              <p className="ca-serif" style={{ fontSize: "var(--ca-t-md)", margin: "8px 0 0" }}>
+                We couldn&apos;t reach the flight provider.
+              </p>
+              <p className="ca-label" style={{ marginTop: 6, marginBottom: "var(--ca-4)" }}>
+                This is not a statement about availability — Atlas didn&apos;t answer, even after
+                retrying, so nothing was ruled out. Try again in a moment.
+              </p>
+              <button
+                type="button"
+                className="ca-btn ca-btn--quiet"
+                onClick={() => {
+                  tried.current = false;
+                  void scan();
+                }}
+              >
+                <Refresh size={16} /> Try again
+              </button>
+            </Card>
           ) : error ? (
             <Card pad>
               <span className="ca-eyebrow">Search failed</span>

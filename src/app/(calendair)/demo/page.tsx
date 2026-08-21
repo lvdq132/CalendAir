@@ -84,8 +84,12 @@ export default function DemoScreen() {
             <KV k="Environment" v={atlas?.environment ?? "…"} />
             <KV k="Authorised" v={String(atlas?.authorized ?? false)} />
             <KV k="Ticketing available" v={String(atlas?.ticketingAvailable ?? false)} />
+            <KV k="Search provenance" v={atlas?.provenance?.search ?? "…"} />
+            <KV k="Ticketing provenance" v={atlas?.provenance?.ticketing ?? "…"} />
+            {atlas?.ticketingBlockedReason && (
+              <KV k="Ticketing blocked reason" v={atlas.ticketingBlockedReason} />
+            )}
             <KV k="Integration mode" v={String((health?.atlas as Record<string, unknown>)?.integrationMode ?? "…")} />
-            <KV k="Credentials present" v={String((health?.atlas as Record<string, unknown>)?.credentialsPresent ?? false)} />
             <KV k="Demo mode" v={demoMode} />
             <KV k="Max replans" v={String(health?.maxReplans ?? "…")} />
             <KV k="Session" v={sessionId ?? "…"} />

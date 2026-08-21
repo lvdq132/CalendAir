@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildDemoWorld } from "./demo/world";
 import { companionOverlap, runOpportunityEngine } from "./engine";
 import { DemoAtlasAdapter } from "@/lib/atlas/demo-adapter";
-import { createAtlasAdapter } from "@/lib/atlas";
+import { createAtlasAdapter, AtlasProviderUnavailableError, type AtlasAdapter } from "@/lib/atlas";
 import { createSession } from "./store";
 import { authorize, scan } from "./flow";
 import { checkHardConstraints } from "./constraints";
@@ -249,5 +249,100 @@ describe("constraint helper", () => {
     });
     expect(verdict.ok).toBe(false);
     expect(verdict.rejection?.detail).toMatch(/after your next commitment/);
+  });
+});
+
+describe("provider outage vs genuine no-results (task-2 top-priority fix)", () => {
+  /**
+   * A transient provider error and a genuine zero-result answer must never
+   * collapse into the same "no viable flights" outcome. This is the exact
+   * bug the fix addresses: previously a failed CLI call silently became an
+   * empty offers array, which the engine could not tell apart from a market
+   * that genuinely had nothing in it.
+   */
+  it("reaches PROVIDER_UNAVAILABLE, not SAFE_STOP, when the adapter cannot reach the provider", async () => {
+    const failingAtlas: AtlasAdapter = {
+      async getStatus() {
+        return {
+          authorized: true,
+          ticketingAvailable: false,
+          environment: "sandbox",
+          adapter: "skill",
+          label: "test adapter",
+          provenance: { search: "live", ticketing: "live" },
+        };
+      },
+      async searchFlights() {
+        throw new AtlasProviderUnavailableError(
+          "Atlas search did not return a trustworthy answer after 3 attempts: SERVICE_TEMPORARILY_UNAVAILABLE",
+        );
+      },
+      async verifyOffer() {
+        throw new Error("not exercised in this test");
+      },
+      async createBooking() {
+        throw new Error("not exercised in this test");
+      },
+      async getBookingStatus() {
+        throw new Error("not exercised in this test");
+      },
+    };
+
+    const session = createSession("perfect", NOW);
+    const result = await scan(session, failingAtlas);
+
+    expect(result.providerUnavailable).toBe(true);
+    expect(result.providerUnavailableDetail).toMatch(/SERVICE_TEMPORARILY_UNAVAILABLE/);
+    expect(result.recommended).toBeUndefined();
+    expect(session.booking.state).toBe("PROVIDER_UNAVAILABLE");
+    // Never worded as if the search had run cleanly and found nothing.
+    expect(session.activity.some((a) => /couldn.t reach the flight provider/i.test(a.detail))).toBe(
+      true,
+    );
+  });
+
+  it("still reaches SAFE_STOP, not PROVIDER_UNAVAILABLE, for a genuine empty market", async () => {
+    const session = createSession("perfect", NOW);
+    // The companion-conflict world is the existing fixture for "the search
+    // runs cleanly and genuinely nothing qualifies" — no adapter failure
+    // involved at all.
+    session.world = buildDemoWorld(NOW, "perfect", { companionConflict: true });
+    const atlas = new DemoAtlasAdapter("perfect");
+
+    const result = await scan(session, atlas);
+
+    expect(result.providerUnavailable).toBe(false);
+    expect(result.recommended).toBeUndefined();
+    expect(session.booking.state).toBe("SAFE_STOP");
+  });
+
+  it("turns a verifyOffer failure into a safe stop instead of crashing the checkpoint", async () => {
+    // Simulates both the skill-mode SUBSCRIPTION_REQUIRED case and the
+    // hybrid-mode "demo ticketing has never heard of this live offer id"
+    // case (see HybridAtlasAdapter.verifyOffer): verification fails for a
+    // reason that is not "the fare sold out", and the flow must not crash.
+    const demoAtlas = new DemoAtlasAdapter("perfect");
+    const session = createSession("perfect", NOW);
+    await scan(session, demoAtlas);
+    const hero = session.engine!.recommended!;
+
+    const verifyFailsAtlas: AtlasAdapter = {
+      getStatus: () => demoAtlas.getStatus(),
+      searchFlights: (input) => demoAtlas.searchFlights(input),
+      async verifyOffer() {
+        throw new Error(
+          "This fare can't be verified yet: Atlas ticketing is not active for this account " +
+            "(TICKETING_ACTIVATION_REQUIRED).",
+        );
+      },
+      createBooking: (input) => demoAtlas.createBooking(input),
+      getBookingStatus: (reference) => demoAtlas.getBookingStatus(reference),
+    };
+
+    const outcome = await authorize(session, verifyFailsAtlas, hero.id);
+
+    expect(outcome.kind).toBe("safe-stop");
+    expect(outcome.kind === "safe-stop" && outcome.reason).toMatch(/TICKETING_ACTIVATION_REQUIRED/);
+    expect(session.booking.state).toBe("SAFE_STOP");
   });
 });

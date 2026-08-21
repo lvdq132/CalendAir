@@ -194,6 +194,15 @@ export interface RejectedCandidate {
 
 // ─── Booking ─────────────────────────────────────────────────────────────────
 
+/**
+ * The booking state machine.
+ *
+ * SAFE_STOP means the search (or a replan) completed and genuinely nothing
+ * qualified — a known fact. PROVIDER_UNAVAILABLE means the provider could not
+ * be reached at all, even after retries, during a search or a reverification
+ * — an unknown, not a "no". The two must never be collapsed into one state:
+ * see AtlasProviderUnavailableError in src/lib/atlas/adapter.ts.
+ */
 export type BookingState =
   | "WINDOW_DETECTED"
   | "SEARCHING"
@@ -212,7 +221,8 @@ export type BookingState =
   | "OFFER_EXPIRED"
   | "SOLD_OUT"
   | "BOOKING_FAILED"
-  | "SAFE_STOP";
+  | "SAFE_STOP"
+  | "PROVIDER_UNAVAILABLE";
 
 export interface PassengerProfile {
   id: string;
@@ -269,7 +279,19 @@ export interface AtlasAccountStatus {
   ticketingAvailable: boolean;
   environment: "sandbox" | "production" | "unknown";
   /** Which adapter answered. Surfaced in the UI so the mode is never hidden. */
-  adapter: "demo" | "skill" | "atrip";
+  adapter: "demo" | "skill" | "atrip" | "hybrid";
   /** Human-readable label shown on the demo badge. */
   label: string;
+  /**
+   * Per-capability provenance. A single `adapter` name is not honest enough
+   * once a mode (hybrid) mixes a live capability with a demo one — this is
+   * what lets the UI and /api/health say, precisely, which half of a
+   * response is real. "unavailable" is for a selected-but-unwired adapter.
+   */
+  provenance: {
+    search: "live" | "demo" | "unavailable";
+    ticketing: "live" | "demo" | "unavailable";
+  };
+  /** Present only when ticketing is blocked by account entitlement, e.g. "TICKETING_ACTIVATION_REQUIRED". */
+  ticketingBlockedReason?: string;
 }

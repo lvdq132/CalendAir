@@ -37,6 +37,7 @@ export class DemoAtlasAdapter implements AtlasAdapter {
       environment: "sandbox",
       adapter: "demo",
       label: "Demo inventory · not live Atlas data",
+      provenance: { search: "demo", ticketing: "demo" },
     };
   }
 

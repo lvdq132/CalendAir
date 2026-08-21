@@ -1,10 +1,12 @@
 import { UnwiredAtlasAdapter, type AtlasAdapter } from "./adapter";
 import { DemoAtlasAdapter } from "./demo-adapter";
 import { SkillAtlasAdapter } from "./skill-adapter";
+import { HybridAtlasAdapter } from "./hybrid-adapter";
 import type { DemoScenario } from "@/lib/calendair/types";
 
 export type { AtlasAdapter } from "./adapter";
-export { AtlasNotWiredError } from "./adapter";
+export { AtlasNotWiredError, AtlasProviderUnavailableError } from "./adapter";
+export { HybridAtlasAdapter } from "./hybrid-adapter";
 
 /**
  * Choose an adapter from the environment.
@@ -13,6 +15,17 @@ export { AtlasNotWiredError } from "./adapter";
  * demo inventory, which is a legitimate choice for a stage demo — but the mode
  * is always reported, and the app never quietly downgrades a live configuration
  * to demo data when a call fails.
+ *
+ * Modes:
+ *   (unset)  DemoAtlasAdapter — deterministic everything.
+ *   skill    SkillAtlasAdapter — live atlas-flight CLI for every call. Ticketing
+ *            is blocked for this account (TICKETING_ACTIVATION_REQUIRED), so
+ *            verifyOffer and everything after it fails until activation completes.
+ *   hybrid   HybridAtlasAdapter — live search, demo verify/booking/status. See
+ *            hybrid-adapter.ts for the full rationale and its false-success guard.
+ *            Unrelated to the DemoMode ("hybrid" | "visual" | "live") type in
+ *            calendair/types.ts, which governs the calendar side, not Atlas.
+ *   atrip    UnwiredAtlasAdapter placeholder — not implemented; fails loudly.
  */
 const adapters = new Map<string, AtlasAdapter>();
 
@@ -32,9 +45,11 @@ export function createAtlasAdapter(scenario: DemoScenario = "perfect"): AtlasAda
   const adapter: AtlasAdapter =
     mode === "skill"
       ? new SkillAtlasAdapter(environment)
-      : mode === "atrip"
-        ? new UnwiredAtlasAdapter(mode, environment) // ATRIP adapter not yet implemented
-        : new DemoAtlasAdapter(scenario);
+      : mode === "hybrid"
+        ? new HybridAtlasAdapter(environment, scenario)
+        : mode === "atrip"
+          ? new UnwiredAtlasAdapter(mode, environment) // ATRIP adapter not yet implemented
+          : new DemoAtlasAdapter(scenario);
   adapters.set(key, adapter);
   return adapter;
 }
