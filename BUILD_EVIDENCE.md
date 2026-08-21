@@ -325,14 +325,79 @@ unset) is unaffected and continues to recommend Dubai 91 as documented.
 
 ---
 
+## Session of 21 August 2026 — environment audit, security check, hybrid mode activation
+
+### 12. Environment audit and `.env.local` update
+
+All environment variables were reconciled against `.env.example` and the running codebase:
+
+| Variable | Before | After | Reason |
+|---|---|---|---|
+| `ATLAS_INTEGRATION_MODE` | *(unset — demo adapter)* | `hybrid` | Search is live (`search_available: true`); ticketing blocked; hybrid is the correct mode |
+| `ATLAS_LIVE_DESTINATION_LIMIT` | *(unset — implicit 3)* | `3` | Made explicit; each extra destination costs ~5 s, nine takes ~45 s |
+| All secret values | preserved | preserved | Never printed or logged |
+
+`ATLAS_CLI_PATH=/Users/bodson/.local/bin/atlas-flight` was already set. `ATLAS_ENV=sandbox` was
+already correct. No OAuth or Qwen credentials were present; those fields remain blank and are not
+required for the current state.
+
+### 13. Atlas status — confirmed live
+
+Full CLI response from `atlas-flight auth status --json`:
+
+```json
+{ "code": "AUTHORIZED", "data": {
+    "authenticated": true,
+    "search_available": true,
+    "ticketing_available": false,
+    "ticketing_blocker": "TICKETING_ACTIVATION_REQUIRED",
+    "ticketing_activation_url": "https://www.atriptech.com/#/workspace" } }
+```
+
+**`TICKETING_ACTIVATION_REQUIRED` — official meaning (from `cli-contract.md`):** remaining ticketing
+activation steps in the ATRIP workspace are incomplete. The CLI contract explicitly states: "do not
+guess which step." The activation URL is the correct next action; the exact step is shown there by
+the ATRIP workspace itself.
+
+Flight search works now. Price verification, order creation, payment, and ticketing are blocked until
+the account owner completes the steps shown at `https://www.atriptech.com/#/workspace`.
+
+### 14. Security check
+
+Full-repo cloud scan could not be run (27,232 lines exceeds the 10,000-line gate). Manual audit
+performed instead:
+
+| Check | Result |
+|---|---|
+| `git check-ignore -v .env.local` | `.gitignore:34:.env*  .env.local` — excluded ✓ |
+| `git ls-files --error-unmatch .env.local` | error: not tracked — confirmed not committed ✓ |
+| `git ls-files` grep for `.env`, `.pem`, `.key`, `.cert`, `.p12`, `.pfx` | only `.env.example` (intentional) ✓ |
+| Grep tracked source files for hardcoded credentials | zero matches outside `process.env` reads ✓ |
+| Atlas CLI auth token location | `~/.local/bin/atlas-flight` — outside the repo tree ✓ |
+
+### 15. Verification
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | clean |
+| `npm run lint` | 3 warnings in `scripts/uat-orders.mjs` (0 errors) |
+| `npm run test` | **114 passed** (unchanged) |
+| `npm run test:e2e` | **31 checks passed** (unchanged) |
+| `npm run build` | success, **15 routes** (unchanged) |
+
+Git history already contained 7 commits; working tree was clean throughout — no code changes were
+required. The rollback point already existed.
+
+---
+
 ## Honest limitations at this point
 
 These are unchanged from the previous session and are stated plainly:
 
-- **Ticketing not yet activated.** With `ATLAS_INTEGRATION_MODE=skill`, the live adapter returns
-  real flight data but all offers carry `price_status: "reference"`. The booking flow correctly
-  refuses to proceed past `authorize()`. Full booking becomes available once `TICKETING_ACTIVATION_REQUIRED`
-  is resolved in the ATRIP workspace at `https://www.atriptech.com/#/workspace`.
+- **Ticketing not yet activated.** `ATLAS_INTEGRATION_MODE=hybrid` enables live flight search;
+  verify/booking/status remain on the deterministic demo adapter until `TICKETING_ACTIVATION_REQUIRED`
+  is resolved in the ATRIP workspace at `https://www.atriptech.com/#/workspace`. Once resolved, set
+  `ATLAS_INTEGRATION_MODE=skill` in `.env.local` to switch to the fully live adapter.
 - **Google Calendar OAuth is not wired.** The wizard card exists; availability comes from the
   prepared demo calendar until the account owner completes the one-time Google authorisation.
 - **Qwen is not called.** The boundary and the `/explain` route exist; no call is made.
