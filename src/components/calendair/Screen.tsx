@@ -1,10 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useSession } from "./SessionProvider";
-import { useOnboarding } from "@/components/onboarding/OnboardingProvider";
 import { Footer, TopBar } from "./ui";
 import { Bell, ChevronLeft } from "./icons";
 
@@ -27,10 +26,13 @@ export function Screen({
   right?: ReactNode;
 }) {
   const router = useRouter();
-  const { openGuide } = useOnboarding();
+  const pathname = usePathname();
+  const { world } = useSession();
+  const route = pathname.split("/").filter(Boolean)[0] ?? "discover";
+  const profileLabel = world?.taste.travellerName || "A";
 
   return (
-    <div className={`ca-shell${night ? " ca-shell--night" : ""}`}>
+    <div className={`ca-shell ca-route--${route}${night ? " ca-shell--night" : ""}`}>
       <TopBar
         left={
           back ? (
@@ -42,16 +44,7 @@ export function Screen({
             >
               <ChevronLeft />
             </button>
-          ) : (
-            <button
-              type="button"
-              className="ca-iconbtn"
-              aria-label="How CALENDAIR works"
-              onClick={() => openGuide("how")}
-            >
-              <span style={{ fontSize: 15, fontWeight: 600 }}>?</span>
-            </button>
-          )
+          ) : undefined
         }
         right={
           right ?? (
@@ -61,8 +54,9 @@ export function Screen({
             </Link>
           )
         }
+        profileLabel={profileLabel}
       />
-      {children}
+      <main className="ca-main">{children}</main>
       <Footer />
     </div>
   );

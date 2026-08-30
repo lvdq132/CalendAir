@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import type { CSSProperties, ReactNode } from "react";
 import { scoreBand } from "@/lib/calendair/scoring";
 import { Star } from "./icons";
@@ -10,19 +11,51 @@ import { Star } from "./icons";
 export function Wordmark({ href = "/" }: { href?: string }) {
   return (
     <Link href={href} className="ca-wordmark" aria-label="CALENDAIR home">
-      <Star size={16} className="ca-wordmark__star" />
+      <Star size={14} className="ca-wordmark__star" />
       <span className="ca-wordmark__name">Calendair</span>
-      <span className="ca-wordmark__tag">Your time, perfected.</span>
     </Link>
   );
 }
 
-export function TopBar({ left, right }: { left?: ReactNode; right?: ReactNode }) {
+const NAV = [
+  { href: "/", label: "Discover" },
+  { href: "/trip", label: "Trips" },
+  { href: "/activity", label: "Activity" },
+];
+
+export function TopBar({
+  left,
+  right,
+  profileLabel = "A",
+}: {
+  left?: ReactNode;
+  right?: ReactNode;
+  profileLabel?: string;
+}) {
+  const pathname = usePathname();
+
   return (
     <header className="ca-topbar">
-      <div>{left}</div>
-      <Wordmark />
-      <div style={{ display: "flex", justifyContent: "flex-end" }}>{right}</div>
+      <div className="ca-topbar__brand">
+        {left}
+        <Wordmark />
+      </div>
+      <nav className="ca-desktop-nav" aria-label="Primary navigation">
+        {NAV.map((item) => {
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          return (
+            <Link key={item.href} href={item.href} className={active ? "is-active" : undefined}>
+              {item.label}
+            </Link>
+          );
+        })}
+      </nav>
+      <div className="ca-topbar__actions">
+        {right}
+        <Link href="/settings" className="ca-profile" aria-label="Open traveller profile">
+          {profileLabel.slice(0, 1).toUpperCase()}
+        </Link>
+      </div>
     </header>
   );
 }

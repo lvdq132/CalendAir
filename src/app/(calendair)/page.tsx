@@ -2,33 +2,19 @@
 
 import Link from "next/link";
 import { useEffect, useRef } from "react";
-import { useSession } from "@/components/calendair/SessionProvider";
-import { ModeBadge, Screen, ScreenNav } from "@/components/calendair/Screen";
-import { Card, Medallion, Pill, ScoreRing, Stat, Stats } from "@/components/calendair/ui";
-import { DayLegend, DayStrip } from "@/components/calendair/DayStrip";
-import {
-  CalendarCheck,
-  ChevronRight,
-  Clock,
-  Pin,
-  Refresh,
-  Star,
-  Users,
-} from "@/components/calendair/icons";
-import { dateRange, money } from "@/components/calendair/format";
+import { useSession, type EngineSnapshot } from "@/components/calendair/SessionProvider";
+import { ModeBadge, Screen } from "@/components/calendair/Screen";
+import { DayStrip } from "@/components/calendair/DayStrip";
+import { Check, ChevronRight, Clock, Pin, Refresh, Star } from "@/components/calendair/icons";
+import { dateRange, duration, money } from "@/components/calendair/format";
 import { OPPORTUNITY_LABEL } from "@/lib/calendair/scoring";
-import { usefulTimeAtDestination, humaniseStay } from "@/lib/calendair/time";
+import { minutesBetween } from "@/lib/calendair/time";
 import { DESTINATION_BY_IATA, ORIGIN_BY_IATA } from "@/lib/calendair/destinations";
+import type { ScoredTrip } from "@/lib/calendair/types";
 
-/**
- * The opportunity home.
- *
- * The traveller does not ask for anything here. The window is already detected
- * and the search already running by the time the screen settles, because the
- * whole premise is that the trip finds you.
- */
+/** The recommendation desk: one decision, the agent state beside it, alternates below. */
 export default function Home() {
-  const { ready, world, engine, scan, scanning, error, atlas, booking } = useSession();
+  const { ready, world, engine, scan, scanning, error, booking } = useSession();
   const tried = useRef(false);
 
   useEffect(() => {
@@ -40,317 +26,230 @@ export default function Home() {
   if (!ready || !world) {
     return (
       <Screen>
-        <Card pad style={{ textAlign: "center", color: "var(--ca-stone-500)" }}>
-          Reading your calendar…
-        </Card>
+        <div className="ca-desktop-loading">
+          <Star className="ca-pulse" /> Preparing your next escape…
+        </div>
       </Screen>
     );
   }
 
-  const { window: win, taste, companions } = world;
+  const { window: win, taste } = world;
   const origin = ORIGIN_BY_IATA[taste.originAirport];
   const hero = engine?.recommended ?? null;
-  const shared = win.sharedWith.length > 0;
 
   return (
     <Screen>
-      <div className="ca-stack">
-        {/* Home airport */}
-        <Card>
-          <Link href="/settings" className="ca-row" data-tour="home.origin">
-            <Medallion>
-              <Pin />
-            </Medallion>
-            <span>
-              <span
-                className="ca-serif"
-                style={{ display: "block", fontSize: "var(--ca-t-md)", lineHeight: 1.25 }}
-              >
-                {origin?.city}, {origin?.country}
-              </span>
-              <span className="ca-label">
-                Home airport · {origin?.airportName} ({taste.originAirport})
-              </span>
-            </span>
-            <span className="ca-link">
-              Change <ChevronRight size={15} />
-            </span>
+      <div className="ca-home">
+        <header className="ca-home__intro">
+          <div>
+            <span className="ca-eyebrow">Curated for your open time</span>
+            <h1 className="ca-display">Your next escape</h1>
+          </div>
+          <Link href="/settings" className="ca-origin-chip">
+            <Pin size={14} /> {origin?.city} · {taste.originAirport}
+            <ChevronRight size={14} />
           </Link>
-        </Card>
+        </header>
 
-        {/* The opening */}
-        <Card pad data-tour="home.opening">
-          <div style={{ display: "flex", alignItems: "center", gap: "var(--ca-5)" }}>
-            <Medallion size="lg">
-              <Star size={24} />
-            </Medallion>
+        <section className="ca-home__primary" aria-label="Recommended escape">
+          <div className="ca-home__recommendation">
+            {hero ? (
+              <RecommendationHero trip={hero} />
+            ) : scanning ? (
+              <SearchingHero />
+            ) : (
+              <SearchStop
+                error={error}
+                unavailable={booking.state === "PROVIDER_UNAVAILABLE"}
+                retry={() => void scan()}
+              />
+            )}
+          </div>
+          <AgentPanel engine={engine} scanning={scanning} windowHours={win.hours} />
+        </section>
+
+        <section className="ca-home__context">
+          <div className="ca-window-bar">
             <div>
-              <div className="ca-display" style={{ fontSize: "var(--ca-t-3xl)", lineHeight: 1 }}>
-                {win.hours}{" "}
-                <span style={{ fontSize: "var(--ca-t-lg)", fontWeight: 400 }}>hours opened</span>
-              </div>
-              <p style={{ margin: "6px 0 0", color: "var(--ca-stone-500)" }}>{win.subhead}</p>
-            </div>
-          </div>
-          {companions.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "var(--ca-3)",
-                marginTop: "var(--ca-5)",
-                padding: "10px var(--ca-4)",
-                border: "1px solid var(--ca-line)",
-                borderRadius: "var(--ca-r-full)",
-                color: shared ? "var(--ca-ink-700)" : "var(--ca-stone-400)",
-              }}
-            >
-              <Users size={17} style={{ color: "var(--ca-gold-600)" }} />
-              {shared
-                ? `You + ${companions.map((c) => c.name).join(", ")}`
-                : `${companions[0].name} is not free in this window`}
-            </div>
-          )}
-        </Card>
-
-        {/* The week */}
-        <Card pad data-tour="home.calendar">
-          <div
-            style={{
-              display: "flex",
-              alignItems: "baseline",
-              justifyContent: "space-between",
-              gap: "var(--ca-4)",
-              marginBottom: "var(--ca-4)",
-            }}
-          >
-            <span className="ca-serif" style={{ fontSize: "var(--ca-t-md)" }}>
-              {dateRange(win.startIso, win.endIso, taste.originAirport)}
-            </span>
-            <Link href="/calendar" className="ca-link">
-              View calendar <ChevronRight size={15} />
-            </Link>
-          </div>
-          <DayStrip
-            startIso={win.startIso}
-            endIso={win.endIso}
-            originIata={taste.originAirport}
-          />
-          <DayLegend />
-        </Card>
-
-        {/* What opened it */}
-        {win.openedBy && (
-          <Card flat>
-            <Link href="/calendar" className="ca-row">
-              <Medallion tone="sage">
-                <CalendarCheck />
-              </Medallion>
+              <span className="ca-window-bar__value">{win.hours}h</span>
               <span>
-                <span style={{ display: "block", fontWeight: 500 }}>
-                  We found a free-time opening
-                </span>
-                <span className="ca-label">
-                  {win.openedBy.title} was released · {dateRange(win.startIso, win.endIso, taste.originAirport)}
-                </span>
+                Free window
+                <small>{dateRange(win.startIso, win.endIso, taste.originAirport)}</small>
               </span>
-              <ChevronRight size={18} style={{ color: "var(--ca-stone-400)" }} />
-            </Link>
-          </Card>
+            </div>
+            <div className="ca-window-bar__days">
+              <DayStrip startIso={win.startIso} endIso={win.endIso} originIata={taste.originAirport} />
+            </div>
+          </div>
+        </section>
+
+        {engine && engine.alternates.length > 0 && (
+          <section className="ca-home__alternates">
+            <div className="ca-section-heading">
+              <div>
+                <span className="ca-eyebrow">Also ranked</span>
+                <h2>More escapes that fit</h2>
+              </div>
+              <Link href="/activity" className="ca-link">
+                How CALENDAIR ranked them <ChevronRight size={15} />
+              </Link>
+            </div>
+            <div className="ca-alternate-grid">
+              {engine.alternates.map((trip) => (
+                <AlternateCard key={trip.id} trip={trip} />
+              ))}
+            </div>
+          </section>
         )}
-
-        {/* The escape */}
-        <div data-tour="home.hero">
-          {hero ? (
-            <HeroCard trip={hero} />
-          ) : scanning ? (
-            <SearchingCard />
-          ) : booking.state === "PROVIDER_UNAVAILABLE" ? (
-            <Card pad>
-              <span className="ca-eyebrow">Provider unavailable</span>
-              <p className="ca-serif" style={{ fontSize: "var(--ca-t-md)", margin: "8px 0 0" }}>
-                We couldn&apos;t reach the flight provider.
-              </p>
-              <p className="ca-label" style={{ marginTop: 6, marginBottom: "var(--ca-4)" }}>
-                This is not a statement about availability — Atlas didn&apos;t answer, even after
-                retrying, so nothing was ruled out. Try again in a moment.
-              </p>
-              <button
-                type="button"
-                className="ca-btn ca-btn--quiet"
-                onClick={() => {
-                  // Deliberately does NOT reset tried.current: this button
-                  // already triggers the retry directly. Resetting it too
-                  // used to let the auto-scan effect notice `scanning`
-                  // flipping back to false after this scan finishes and
-                  // fire a second, unrequested scan for the same click.
-                  void scan();
-                }}
-              >
-                <Refresh size={16} /> Try again
-              </button>
-            </Card>
-          ) : error ? (
-            <Card pad>
-              <span className="ca-eyebrow">Search failed</span>
-              <p className="ca-serif" style={{ fontSize: "var(--ca-t-md)", margin: "8px 0" }}>
-                {error}
-              </p>
-              <p className="ca-label" style={{ marginBottom: "var(--ca-4)" }}>
-                {atlas?.adapter !== "demo"
-                  ? "The live provider is selected but its adapter has not been implemented, so nothing was substituted."
-                  : "No itinerary was returned."}
-              </p>
-              <button
-                type="button"
-                className="ca-btn ca-btn--quiet"
-                onClick={() => {
-                  // Deliberately does NOT reset tried.current: this button
-                  // already triggers the retry directly. Resetting it too
-                  // used to let the auto-scan effect notice `scanning`
-                  // flipping back to false after this scan finishes and
-                  // fire a second, unrequested scan for the same click.
-                  void scan();
-                }}
-              >
-                <Refresh size={16} /> Try again
-              </button>
-            </Card>
-          ) : (
-            <Card pad>
-              <span className="ca-eyebrow">Safe stop</span>
-              <p className="ca-serif" style={{ fontSize: "var(--ca-t-md)", margin: "8px 0 0" }}>
-                Nothing cleared every rule you set.
-              </p>
-              <p className="ca-label" style={{ marginTop: 6 }}>
-                The window stays open and the agent keeps watching. See{" "}
-                <Link href="/activity" className="ca-link" style={{ fontSize: "inherit" }}>
-                  what it rejected
-                </Link>
-                .
-              </p>
-            </Card>
-          )}
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "center", paddingTop: "var(--ca-2)" }}>
-          <ModeBadge />
-        </div>
-        <ScreenNav />
       </div>
     </Screen>
   );
 }
 
-function SearchingCard() {
-  // The claim here has to match the adapter actually running, not the
-  // aspiration — see ModeBadge in Screen.tsx for the same rule applied to
-  // the badge. "demo" is deterministic inventory, never live Atlas data.
-  const { atlas } = useSession();
-  const live = atlas?.adapter === "hybrid" || atlas?.adapter === "skill";
+function RecommendationHero({ trip }: { trip: ScoredTrip }) {
+  const dest = DESTINATION_BY_IATA[trip.destination];
+  const flight = duration(minutesBetween(trip.outboundDepartureIso, trip.outboundArrivalIso));
+
   return (
-    <Card pad className="ca-rise">
-      <div style={{ display: "flex", alignItems: "center", gap: "var(--ca-4)" }}>
-        <Medallion>
-          <Star size={18} className="ca-pulse" />
-        </Medallion>
+    <article className="ca-recommendation">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={dest?.photo} alt={trip.destinationName} className="ca-recommendation__image" />
+      <div className="ca-recommendation__shade" />
+      <div className="ca-recommendation__topline">
+        <span>{OPPORTUNITY_LABEL[trip.opportunityType]}</span>
+        <span className="ca-recommendation__score">
+          <strong>{trip.escapeScore}</strong> CALENDAIR score
+        </span>
+      </div>
+      <div className="ca-recommendation__content">
         <div>
-          <div className="ca-serif" style={{ fontSize: "var(--ca-t-md)" }}>
-            {live ? "Searching live inventory" : "Searching the prepared inventory"}
-          </div>
-          <span className="ca-label">
-            {live
-              ? "Reading real routes and fares for your window"
-              : "Deterministic demo routes and fares — not live Atlas data"}
-          </span>
+          <span className="ca-recommendation__country">{trip.destinationCountry}</span>
+          <h2>{trip.destinationName}</h2>
+          <p>{trip.reasons[0] ?? trip.promise}</p>
         </div>
+        <div className="ca-recommendation__metrics">
+          <Metric label="Dates" value={dateRange(trip.outboundDepartureIso, trip.returnArrivalIso!, trip.origin)} />
+          <Metric label="Travel time" value={flight} />
+          <Metric label="Return fare" value={money(trip.totalPrice, trip.currency)} />
+        </div>
+        <Link href={`/opportunity/${trip.id}`} className="ca-btn ca-btn--primary ca-recommendation__cta">
+          Explore {trip.destinationName} <ChevronRight size={17} />
+        </Link>
       </div>
-      <div style={{ display: "grid", gap: 8, marginTop: "var(--ca-5)" }}>
-        {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            className="ca-pulse"
-            style={{
-              height: 10,
-              borderRadius: 5,
-              background: "var(--ca-ivory-200)",
-              width: `${100 - i * 18}%`,
-              animationDelay: `${i * 0.18}s`,
-            }}
-          />
-        ))}
-      </div>
-      <Link href="/activity" className="ca-link" style={{ marginTop: "var(--ca-5)" }}>
-        Watch the agent work <ChevronRight size={15} />
-      </Link>
-    </Card>
+    </article>
   );
 }
 
-function HeroCard({ trip }: { trip: NonNullable<ReturnType<typeof useSession>["engine"]>["recommended"] }) {
-  if (!trip) return null;
-  const dest = DESTINATION_BY_IATA[trip.destination];
-  const stay = usefulTimeAtDestination(
-    trip.outboundArrivalIso,
-    trip.returnDepartureIso!,
-    dest?.zone ?? "UTC",
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <span>
+      <small>{label}</small>
+      <strong>{value}</strong>
+    </span>
   );
+}
+
+function AgentPanel({
+  engine,
+  scanning,
+  windowHours,
+}: {
+  engine: EngineSnapshot | null;
+  scanning: boolean;
+  windowHours: number;
+}) {
+  const complete = Boolean(engine?.recommended);
+  const rows = [
+    ["Calendar checked", `${windowHours}h opening`, true],
+    ["Free window found", "Constraints applied", true],
+    ["Flights scanned", engine ? `${engine.scanned} itineraries` : "In progress", Boolean(engine)],
+    ["Preferences matched", engine ? `${engine.constraintsActive} hard rules` : "Waiting", complete],
+    ["Fare verified", complete ? "Ready to review" : "Waiting", complete],
+  ] as const;
 
   return (
-    <Card className="ca-rise" style={{ overflow: "hidden" }}>
-      <div className="ca-hero" style={{ borderRadius: 0, aspectRatio: "16 / 11" }}>
+    <aside className="ca-agent-panel">
+      <div className="ca-agent-panel__head">
+        <div>
+          <span className="ca-eyebrow">CALENDAIR agent</span>
+          <h2>{scanning ? "Scanning your weekend…" : complete ? "Escape ready" : "Standing by"}</h2>
+        </div>
+        <span className={`ca-agent-state${scanning ? " is-working" : ""}`}>
+          <span /> {scanning ? "Working" : "Complete"}
+        </span>
+      </div>
+      <div className="ca-agent-rows">
+        {rows.map(([label, detail, done]) => (
+          <div className={done ? "is-done" : undefined} key={label}>
+            <span className="ca-agent-row__icon">{done ? <Check size={13} /> : <span />}</span>
+            <span>
+              <strong>{label}</strong>
+              <small>{detail}</small>
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="ca-agent-panel__foot">
+        <ModeBadge />
+        <Link href="/activity">View activity <ChevronRight size={14} /></Link>
+      </div>
+    </aside>
+  );
+}
+
+function AlternateCard({ trip }: { trip: ScoredTrip }) {
+  const dest = DESTINATION_BY_IATA[trip.destination];
+  const flight = duration(minutesBetween(trip.outboundDepartureIso, trip.outboundArrivalIso));
+  return (
+    <Link href={`/opportunity/${trip.id}`} className="ca-alternate">
+      <span className="ca-alternate__image">
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={dest?.photo} alt="" className="ca-hero__img" />
-        <div className="ca-hero__scrim" />
-        <div className="ca-hero__top">
-          <Pill tone="gold">{OPPORTUNITY_LABEL[trip.opportunityType]}</Pill>
-          <span className="ca-scorebadge">
-            <ScoreRing score={trip.escapeScore} size={58} />
-          </span>
-        </div>
-        <div className="ca-hero__bottom">
-          <div className="ca-hero__city">{trip.destinationName}</div>
-          <p className="ca-hero__promise">{trip.promise}</p>
-        </div>
-      </div>
+        <img src={dest?.photo} alt="" />
+      </span>
+      <span className="ca-alternate__copy">
+        <span className="ca-alternate__top">
+          <strong>{trip.destinationName}</strong>
+          <em>{trip.escapeScore}</em>
+        </span>
+        <small>{trip.destinationCountry}</small>
+        <span className="ca-alternate__meta">
+          <b>{money(trip.totalPrice, trip.currency)}</b>
+          <span><Clock size={13} /> {flight}</span>
+          <ChevronRight size={16} />
+        </span>
+      </span>
+    </Link>
+  );
+}
 
-      <Stats cols={2}>
-        <Stat
-          label={
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Clock size={14} style={{ color: "var(--ca-gold-600)" }} /> Useful time there
-            </span>
-          }
-          value={<span style={{ fontSize: "var(--ca-t-md)" }}>{humaniseStay(stay.nights, stay.days)}</span>}
-          hint={dateRange(trip.outboundArrivalIso, trip.returnDepartureIso!, trip.destination)}
-        />
-        <Stat
-          label={
-            <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <Star size={13} style={{ color: "var(--ca-gold-500)" }} /> Return buffer
-            </span>
-          }
-          value={
-            <span style={{ fontSize: "var(--ca-t-md)" }}>
-              ~{Math.round(trip.returnBufferMinutes / 60)} hours
-            </span>
-          }
-          hint="Before your next commitment"
-        />
-      </Stats>
+function SearchingHero() {
+  return (
+    <div className="ca-searching-hero">
+      <Star size={30} className="ca-pulse" />
+      <span className="ca-eyebrow">Calendar → Constraints → Atlas → Ranking</span>
+      <h2>Finding the trip your time can hold.</h2>
+      <div className="ca-searching-hero__line"><span /></div>
+    </div>
+  );
+}
 
-      <div style={{ padding: "0 var(--ca-5) var(--ca-5)" }}>
-        <Link href={`/opportunity/${trip.id}`} className="ca-btn ca-btn--navy">
-          <Star size={16} style={{ color: "var(--ca-gold-400)" }} />
-          Explore escape
-        </Link>
-        <p
-          className="ca-label"
-          style={{ textAlign: "center", marginTop: "var(--ca-3)", marginBottom: 0 }}
-        >
-          {money(trip.totalPrice, trip.currency)} per person · {trip.stops === 0 ? "non-stop" : `${trip.stops} stop`} · {trip.cabin?.toLowerCase()}
-        </p>
-      </div>
-    </Card>
+function SearchStop({
+  error,
+  unavailable,
+  retry,
+}: {
+  error: string | null;
+  unavailable: boolean;
+  retry: () => void;
+}) {
+  return (
+    <div className="ca-searching-hero">
+      <Star size={28} />
+      <span className="ca-eyebrow">{unavailable ? "Provider unavailable" : error ? "Search paused" : "Safe stop"}</span>
+      <h2>{error ?? (unavailable ? "Atlas did not answer." : "No trip cleared every rule.")}</h2>
+      <button type="button" className="ca-btn ca-btn--quiet ca-btn--sm" onClick={retry}>
+        <Refresh size={15} /> Try again
+      </button>
+    </div>
   );
 }

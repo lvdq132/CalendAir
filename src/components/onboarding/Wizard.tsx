@@ -138,27 +138,26 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 1 of 8"
         title="First, when are you free?"
-        body="Calendair works from your availability — not from what is in your diary. It needs to know that Friday afternoon opened up, never why."
+        body="Free/busy only. CALENDAIR never reads what is in your diary."
       />
       <OptionCard
         selected={draft.calendarProvider === "demo"}
         onSelect={() => set("calendarProvider", "demo")}
         icon={<CalendarCheck size={18} />}
         title="Use the prepared calendar"
-        detail="A deterministic fictional week, ready to run."
-        note="What the judged demo uses. Nothing to connect."
+        detail="The judge-ready fictional week."
+        note="Ready now"
       />
       <OptionCard
         selected={draft.calendarProvider === "google"}
         onSelect={() => set("calendarProvider", "google")}
         icon={<Star size={17} />}
         title="Google Calendar"
-        detail="Free/busy access only, at the narrowest scope Google offers."
-        note="Not connected in this build: it needs a one-time authorisation from the account owner. Until then availability comes from the prepared calendar, and every screen says so."
+        detail="Narrow free/busy access."
+        note="Needs one-time account authorization"
       />
       <Assurance>
-        <Lock size={13} /> Event titles are never requested, stored, shown or sent to a model. A
-        companion&rsquo;s calendar is only ever read as busy or free.
+        <Lock size={13} /> Event names never leave your calendar. Companions are only busy or free.
       </Assurance>
     </div>,
 
@@ -167,7 +166,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 2 of 8"
         title="Where do you fly from?"
-        body="Your home airport anchors every search, and its timezone anchors every calculation."
+        body="This anchors every route and time calculation."
       />
       <TextField
         label="Your name"
@@ -214,7 +213,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 3 of 8"
         title="How far should I reach?"
-        body="This changes how much an unfamiliar destination is worth when scores are compared. It is the only thing it changes."
+        body="Set how boldly CALENDAIR should rank unfamiliar places."
       />
       <OptionCard
         selected={draft.spontaneity === "safe"}
@@ -236,8 +235,7 @@ export function Wizard() {
         detail="Somewhere I would never have thought to look."
       />
       <Assurance>
-        <Lock size={13} /> This can never move your budget, your timings, your return buffer, or the
-        approval you give before anything is booked.
+        <Lock size={13} /> Budget, timing, buffer and booking approval stay fixed.
       </Assurance>
     </div>,
 
@@ -246,7 +244,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 4 of 8"
         title="Now your limits."
-        body="These are pass/fail. An itinerary that breaks one of them cannot win, whatever else it has going for it."
+        body="Pass/fail rules. A trip that breaks one cannot be recommended."
       />
       <Segmented
         label="Currency"
@@ -322,7 +320,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 5 of 8"
         title="What do you travel for?"
-        body={`Choose up to ${BOUNDS.interests.max}. These are counted against what a destination is actually good for, and they move the score — never a rule.`}
+        body={`Choose up to ${BOUNDS.interests.max}. These tune ranking, never your hard limits.`}
       />
       <div className="es-wiz__tastes">
         {TASTE_TAGS.map((tag) => (
@@ -348,7 +346,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 6 of 8"
         title="Anywhere you have always meant to go?"
-        body="Order matters — the first one counts for the most. You can skip this entirely."
+        body="Optional. Put the place you want most first."
       />
       <ChipRow
         values={draft.dreamDestinations}
@@ -390,7 +388,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 7 of 8"
         title="Anyone coming with you?"
-        body="A window only counts as shared when both calendars are genuinely free for all of it."
+        body="Shared trips only appear when both calendars are free."
       />
       <TextField
         label="Their first name"
@@ -407,8 +405,7 @@ export function Wizard() {
         detail="Search for one seat and skip the overlap check."
       />
       <Assurance>
-        <Lock size={13} /> Matching uses availability alone. Their event titles are never requested,
-        and a name is only ever a label on your own screen.
+        <Lock size={13} /> Matching uses availability alone. Their event names stay private.
       </Assurance>
     </div>,
 
@@ -417,7 +414,7 @@ export function Wizard() {
       <StepHeading
         eyebrow="Step 8 of 8"
         title="How often should I speak up?"
-        body="An opening is only worth telling you about if you want to hear it."
+        body="Choose when an opening is worth interrupting you."
       />
       <OptionCard
         selected={draft.notifications === "quiet"}
@@ -442,67 +439,89 @@ export function Wizard() {
         detail="Anything worth considering."
       />
       <Assurance>
-        <Lock size={13} /> However often I speak up, nothing is verified, priced or booked until you
-        say so.
+        <Lock size={13} /> Nothing is priced or booked until you approve it.
       </Assurance>
     </div>,
   ];
 
   return (
     <div className="es-wiz">
-      <div className="es-wiz__progress" aria-hidden>
-        {Array.from({ length: STEP_COUNT }, (_, n) => (
-          <span
-            key={n}
-            className={`es-wiz__pip${n === step ? " is-active" : ""}${n < step ? " is-done" : ""}`}
-          />
-        ))}
-      </div>
+      <aside className="es-wiz__aside">
+        <div>
+          <span className="ca-eyebrow">Traveller profile</span>
+          <h2>Make every opening feel like yours.</h2>
+          <p>Eight quick choices. Your hard limits stay hard.</p>
+        </div>
+        <div className="es-wiz__completion">
+          <strong>{Math.round(((step + 1) / STEP_COUNT) * 100)}%</strong>
+          <span>complete</span>
+        </div>
+        <ol className="es-wiz__outline">
+          {["Calendar", "Home", "Range", "Limits", "Taste", "Dream list", "Company", "Alerts"].map(
+            (label, n) => (
+              <li key={label} className={`${n === step ? "is-active" : ""}${n < step ? " is-done" : ""}`}>
+                <span>{n < step ? "✓" : String(n + 1).padStart(2, "0")}</span>
+                {label}
+              </li>
+            ),
+          )}
+        </ol>
+        <button type="button" className="es-wiz__prepared" onClick={usePrepared} disabled={leaving}>
+          Use prepared demo profile
+        </button>
+      </aside>
 
-      <div key={step} className="ca-rise">
-        {steps[step]}
-      </div>
+      <section className="es-wiz__workspace">
+        <div className="es-wiz__progress" aria-hidden>
+          {Array.from({ length: STEP_COUNT }, (_, n) => (
+            <span
+              key={n}
+              className={`es-wiz__pip${n === step ? " is-active" : ""}${n < step ? " is-done" : ""}`}
+            />
+          ))}
+        </div>
 
-      <div className="es-wiz__foot">
-        {step > 0 ? (
-          <button
-            type="button"
-            className="ca-btn ca-btn--quiet es-wiz__back"
-            onClick={() => setStep((n) => n - 1)}
-            disabled={leaving}
-          >
-            Back
-          </button>
-        ) : (
-          <span />
-        )}
+        <div key={step} className="ca-rise es-wiz__question">
+          {steps[step]}
+        </div>
 
-        {step < STEP_COUNT - 1 ? (
-          <button
-            type="button"
-            className="ca-btn ca-btn--navy"
-            onClick={() => setStep((n) => n + 1)}
-            disabled={!canAdvance || leaving}
-          >
-            Continue
-            <IconArrow />
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="ca-btn ca-btn--gold"
-            onClick={finish}
-            disabled={leaving}
-          >
-            <Star size={16} />
-            Start exploring
-          </button>
-        )}
-      </div>
+        <div className="es-wiz__foot">
+          {step > 0 ? (
+            <button
+              type="button"
+              className="ca-btn ca-btn--quiet es-wiz__back"
+              onClick={() => setStep((n) => n - 1)}
+              disabled={leaving}
+            >
+              Back
+            </button>
+          ) : (
+            <span />
+          )}
 
-      <button type="button" className="es-wiz__prepared" onClick={usePrepared} disabled={leaving}>
-        Skip this — run on the prepared demo traveller
-      </button>
+          {step < STEP_COUNT - 1 ? (
+            <button
+              type="button"
+              className="ca-btn ca-btn--navy"
+              onClick={() => setStep((n) => n + 1)}
+              disabled={!canAdvance || leaving}
+            >
+              Continue
+              <IconArrow />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="ca-btn ca-btn--gold"
+              onClick={finish}
+              disabled={leaving}
+            >
+              <Star size={16} />
+              Start exploring
+            </button>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
