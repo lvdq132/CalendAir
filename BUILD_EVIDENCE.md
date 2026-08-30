@@ -392,7 +392,7 @@ required. The rollback point already existed.
 
 ## Honest limitations at this point
 
-These are unchanged from the previous session and are stated plainly:
+Stated plainly:
 
 - **Ticketing not yet activated.** `ATLAS_INTEGRATION_MODE=hybrid` enables live flight search;
   verify/booking/status remain on the deterministic demo adapter until `TICKETING_ACTIVATION_REQUIRED`
@@ -400,6 +400,13 @@ These are unchanged from the previous session and are stated plainly:
   `ATLAS_INTEGRATION_MODE=skill` in `.env.local` to switch to the fully live adapter.
 - **Google Calendar OAuth is not wired.** The wizard card exists; availability comes from the
   prepared demo calendar until the account owner completes the one-time Google authorisation.
-- **Qwen is not called.** The boundary and the `/explain` route exist; no call is made.
-- Sessions are in memory and do not survive a server restart.
+- **Qwen is wired but degrades to deterministic reasons here.** `src/lib/llm/qwen.ts` and the
+  `/explain` route are implemented and call the model; the call path only falls back to the
+  deterministic reasons because `ALIBABA_CLOUD_MODEL_STUDIO_API_KEY`/`QWEN_MODEL` are unset in this
+  environment. (Corrected: an earlier revision of this section said "not called," which no longer
+  matched the code.)
+- **Sessions are in memory, backed by a disk snapshot.** `src/lib/calendair/store.ts` mirrors every
+  mutating request to a gitignored JSON snapshot under `/.data/` and reloads it on process start, so
+  a restart mid-demo no longer wipes an in-flight session. Still not a database. (Corrected: an
+  earlier revision said sessions "do not survive a server restart.")
 - `npm run test:e2e` drives the HTTP API, not a browser.
