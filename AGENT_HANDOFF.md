@@ -27,7 +27,7 @@ The CALENDAIR product, mobile-first, end to end.
 |---|---|
 | `npm run typecheck` | clean |
 | `npm run lint` | clean (3 pre-existing warnings in `scripts/uat-orders.mjs`, unrelated) |
-| `npm run test` | 107 passed |
+| `npm run test` | 114 passed |
 | `npm run test:e2e` | 31 checks passed across all four scenarios |
 | `npm run build` | success, 21 routes |
 

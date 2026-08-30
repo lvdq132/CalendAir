@@ -5,7 +5,7 @@ results are copied from the terminal rather than assumed.
 
 **This whole file is a historical snapshot, deliberately left as it was recorded — the counts,
 gaps and adapter list below are what the repository looked like on 20 Aug, not what it looks like
-now.** For the current numbers (87 unit tests, 31 e2e checks, 21 routes, four Atlas adapters
+now.** For the current numbers (114 unit tests, 31 e2e checks, 21 routes, four Atlas adapters
 including live and hybrid) see `README.md` and `AGENT_HANDOFF.md`. Onboarding, the traveller
 profile, the live/hybrid Atlas adapters and most of what "P0 gaps" below lists have since been
 built; this file is kept as evidence of where the build actually started, not edited to keep pace
