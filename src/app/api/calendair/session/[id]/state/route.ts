@@ -19,6 +19,9 @@ export async function GET(_req: Request, ctx: Ctx) {
           rejected: session.engine.rejected,
           scanned: session.engine.scanned,
           constraintsActive: session.engine.constraintsActive,
+          safeOffers: session.engine.safeOffers,
+          idealMatches: session.engine.idealMatches,
+          relaxedMatches: session.engine.relaxedMatches,
           searchInput: session.engine.searchInput,
         }
       : null,

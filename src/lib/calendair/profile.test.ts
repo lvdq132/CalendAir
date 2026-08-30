@@ -201,11 +201,13 @@ describe("a profile genuinely reaches the engine", () => {
     expect(JSON.stringify(world.companions)).not.toMatch(/title/i);
   });
 
-  it("raises the minimum useful hours into a real rejection", async () => {
+  it("raises the minimum useful hours into a visible best-available relaxation", async () => {
     const p = sanitiseProfile({ ...DEMO_PROFILE, minUsefulHours: 60 });
     const { result } = await runWith(p);
-    expect(result.recommended).toBeUndefined();
-    expect(result.rejected.some((r) => r.rule === "Not enough time there")).toBe(true);
+    expect(result.recommended).toBeDefined();
+    expect(result.recommended?.bestAvailableMatch).toBe(true);
+    expect(result.recommended?.relaxedPreferences).toContain("Shorter stay");
+    expect(result.recommended?.reasons[0]).toMatch(/still fits your schedule/i);
   });
 });
 

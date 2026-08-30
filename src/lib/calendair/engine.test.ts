@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildDemoWorld } from "./demo/world";
-import { companionOverlap, runOpportunityEngine } from "./engine";
+import { buildSearchInput, companionOverlap, runOpportunityEngine } from "./engine";
 import { DemoAtlasAdapter } from "@/lib/atlas/demo-adapter";
 import { createAtlasAdapter, AtlasProviderUnavailableError, type AtlasAdapter } from "@/lib/atlas";
 import { createSession } from "./store";
@@ -66,18 +66,24 @@ describe("AT-004 useful-hours arithmetic", () => {
   });
 });
 
-describe("AT-005 / AT-006 / AT-007 hard constraints", () => {
+describe("AT-005 / AT-006 / AT-007 safety constraints and scored preferences", () => {
   it("rejects a fare over the hard maximum however good the destination", async () => {
     const { result } = await run();
     const business = result.rejected.find((r) => r.offerId === "atl-nrt-business");
     expect(business?.rule).toBe("Over your budget");
   });
 
-  it("rejects an itinerary with too little time on the ground", async () => {
-    const { result } = await run();
-    expect(result.rejected.find((r) => r.offerId === "atl-kix-onestop")?.rule).toBe(
-      "Not enough time there",
-    );
+  it("scores too little time on the ground as a preference miss", () => {
+    const world = buildDemoWorld(NOW);
+    const offer = demoOffers(world.window, "perfect").find((o) => o.id === "atl-kix-onestop")!;
+    const verdict = checkHardConstraints(offer, {
+      window: world.window,
+      taste: world.taste,
+      nextCommitmentIso: world.nextCommitmentIso,
+      companionAvailable: true,
+    });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.preferenceMisses.some((miss) => miss.id === "usefulHours")).toBe(true);
   });
 
   it("never lets a reference-only fare through, even when it is the cheapest", async () => {
@@ -88,6 +94,22 @@ describe("AT-005 / AT-006 / AT-007 hard constraints", () => {
     expect([result.recommended, ...result.alternates].every((t) => !t?.referenceOnly)).toBe(true);
   });
 
+  it("keeps a provider-unbookable offer as a hard rejection", () => {
+    const world = buildDemoWorld(NOW);
+    const offer = demoOffers(world.window, "perfect").find((o) => o.id === "atl-dxb-nonstop")!;
+    const verdict = checkHardConstraints(
+      { ...offer, bookable: false, referenceOnly: false },
+      {
+        window: world.window,
+        taste: world.taste,
+        nextCommitmentIso: world.nextCommitmentIso,
+        companionAvailable: true,
+      },
+    );
+    expect(verdict.ok).toBe(false);
+    expect(verdict.rejection?.rule).toBe("Offer not bookable");
+  });
+
   it("rejects an itinerary that lands after the window closes", async () => {
     const { result } = await run();
     expect(result.rejected.find((r) => r.offerId === "atl-jfk-nonstop")?.rule).toBe(
@@ -95,11 +117,17 @@ describe("AT-005 / AT-006 / AT-007 hard constraints", () => {
     );
   });
 
-  it("rejects more connections than the traveller tolerates", async () => {
-    const { result } = await run();
-    expect(result.rejected.find((r) => r.offerId === "atl-nrt-double-stop")?.rule).toBe(
-      "Too many connections",
-    );
+  it("scores extra connections as a preference miss", () => {
+    const world = buildDemoWorld(NOW);
+    const offer = demoOffers(world.window, "perfect").find((o) => o.id === "atl-nrt-double-stop")!;
+    const verdict = checkHardConstraints(offer, {
+      window: world.window,
+      taste: world.taste,
+      nextCommitmentIso: world.nextCommitmentIso,
+      companionAvailable: true,
+    });
+    expect(verdict.ok).toBe(true);
+    expect(verdict.preferenceMisses.some((miss) => miss.id === "stops")).toBe(true);
   });
 
   it("rejects the whole window when the companion is not free", async () => {
@@ -112,6 +140,20 @@ describe("AT-005 / AT-006 / AT-007 hard constraints", () => {
 });
 
 describe("recommendation", () => {
+  it("queries Atlas on the last date that can still preserve the return buffer", () => {
+    const world = buildDemoWorld(NOW);
+    const search = buildSearchInput({
+      window: world.window,
+      taste: world.taste,
+      companions: world.companions,
+      nextCommitmentIso: world.nextCommitmentIso,
+    });
+    expect(search.returnBefore).toBe(
+      new Date(Date.parse(world.nextCommitmentIso) - world.taste.returnBufferMinutes * 60_000).toISOString(),
+    );
+    expect(Date.parse(search.returnBefore)).toBeLessThan(Date.parse(world.window.endIso));
+  });
+
   it("returns one hero and at most two alternates", async () => {
     const { result } = await run();
     expect(result.recommended).toBeDefined();
@@ -135,6 +177,21 @@ describe("recommendation", () => {
     const { result } = await run();
     const total = result.recommended!.factors.reduce((n, f) => n + f.points, 0);
     expect(Math.round(total)).toBe(result.recommended!.escapeScore);
+  });
+
+  it("returns an honestly labelled best available match when only preferences miss", async () => {
+    const world = buildDemoWorld(NOW);
+    const result = await runOpportunityEngine(new DemoAtlasAdapter("perfect"), {
+      window: world.window,
+      taste: { ...world.taste, minUsefulHours: 60, maxFlightMinutes: 60, maxStops: 0 },
+      companions: world.companions,
+      nextCommitmentIso: world.nextCommitmentIso,
+    });
+    expect(result.recommended).toBeDefined();
+    expect(result.recommended?.bestAvailableMatch).toBe(true);
+    expect(result.recommended?.opportunityType).toBe("best-available");
+    expect(result.recommended?.reasons[0]).toMatch(/preference.*relaxed.*fits your schedule/i);
+    expect(result.recommended!.totalPrice).toBeLessThanOrEqual(world.taste.maxSpontaneousSpend);
   });
 });
 

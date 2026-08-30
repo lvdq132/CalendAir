@@ -22,6 +22,9 @@ export async function POST(_req: Request, ctx: Ctx) {
       rejected: result.rejected,
       scanned: result.scanned,
       constraintsActive: result.constraintsActive,
+      safeOffers: result.safeOffers,
+      idealMatches: result.idealMatches,
+      relaxedMatches: result.relaxedMatches,
       activity: session.activity,
     });
   } catch (err) {

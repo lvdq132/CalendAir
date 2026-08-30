@@ -115,7 +115,7 @@ interface CliOffer {
   total_price: number;
   segments: CliSegment[];
   bookable: boolean;
-  price_status: string; // "bookable" | "reference"
+  price_status: string; // Observed: "current" | "bookable" | "reference"
 }
 
 interface CliEnvelope {
@@ -163,7 +163,11 @@ function normalizeCliOffer(raw: CliOffer): NormalizedOffer {
     totalPrice: raw.total_price,
     currency: raw.currency,
     bookable: raw.bookable,
-    referenceOnly: raw.price_status !== "bookable",
+    // Observed live Atlas values include `current` for a genuinely bookable
+    // fare. Treat only the provider's explicit reference state (or a false
+    // bookable flag) as comparison-only; the old `!== "bookable"` check
+    // incorrectly downgraded every `current` live offer to an unusable quote.
+    referenceOnly: !raw.bookable || raw.price_status === "reference",
     stops: Math.max(0, out.length - 1),
     source: "ATLAS",
     outboundFlight: outFirst.flight_number,

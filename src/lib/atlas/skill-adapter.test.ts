@@ -84,7 +84,7 @@ function searchInput(destination: string) {
   };
 }
 
-function offerEnvelope(id: string): QueuedResponse {
+function offerEnvelope(id: string, priceStatus = "bookable"): QueuedResponse {
   return {
     status: "success",
     code: "FLIGHT_SEARCHED",
@@ -95,7 +95,7 @@ function offerEnvelope(id: string): QueuedResponse {
           currency: "GBP",
           total_price: 250,
           bookable: true,
-          price_status: "bookable",
+          price_status: priceStatus,
           segments: [
             {
               departure_airport: "LON",
@@ -129,6 +129,17 @@ beforeEach(() => {
 });
 
 describe("SkillAtlasAdapter — retry with backoff (task 1)", () => {
+  it("keeps a provider-bookable `current` live fare out of the reference-only bucket", async () => {
+    queue.push(offerEnvelope("OFR-CURRENT", "current"));
+    const adapter = new SkillAtlasAdapter("sandbox");
+
+    const offers = await adapter.searchFlights(searchInput("BCN"));
+
+    expect(offers).toHaveLength(1);
+    expect(offers[0].bookable).toBe(true);
+    expect(offers[0].referenceOnly).toBe(false);
+  });
+
   it("retries a retryable_error and returns real offers once the CLI recovers", async () => {
     queue.push(RETRYABLE, RETRYABLE, offerEnvelope("OFR-1"));
     const adapter = new SkillAtlasAdapter("sandbox");

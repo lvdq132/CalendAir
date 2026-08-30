@@ -198,12 +198,18 @@ export function scoreOffer(
     friction -= 3;
     frictionNotes.push("connection");
   }
+  for (const miss of verdict.preferenceMisses) {
+    if (miss.id === "usefulHours") friction -= 4;
+    if (miss.id === "flightDuration") friction -= 4;
+    if (miss.id === "stops") friction -= 3;
+    frictionNotes.push(miss.label.toLowerCase());
+  }
   factors.push({
     id: "friction",
     label: "Friction",
     points: friction,
-    max: -7,
-    detail: frictionNotes.length ? frictionNotes.join(" · ") : "None",
+    max: -14,
+    detail: frictionNotes.length ? Array.from(new Set(frictionNotes)).join(" · ") : "None",
   });
 
   const escapeScore = Math.max(
@@ -223,6 +229,7 @@ export function scoreOffer(
     opportunityType: classify(ctx, dreamIndex >= 0, ratio),
     dreamMatch: dreamIndex >= 0 ? Math.round(dreamMatch * 100) : undefined,
     promise: dest?.promise ?? "",
+    relaxedPreferences: verdict.preferenceMisses.map((miss) => miss.label),
   };
 }
 
@@ -270,6 +277,7 @@ export const OPPORTUNITY_LABEL: Record<OpportunityType, string> = {
   "long-weekend": "Long weekend",
   "milestone-match": "Milestone match",
   wildcard: "Wildcard",
+  "best-available": "Best available match",
 };
 
 /** The word shown under the number. Bands are fixed so the label never flatters. */

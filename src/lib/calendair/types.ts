@@ -171,6 +171,10 @@ export interface ScoredTrip extends NormalizedOffer {
   opportunityType: OpportunityType;
   dreamMatch?: number;
   promise: string;
+  /** Non-safety preferences this offer misses; empty means the full preference set matched. */
+  relaxedPreferences: string[];
+  /** True only when every safe offer missed at least one preference. */
+  bestAvailableMatch?: boolean;
   /** Optional Qwen-authored "why this fits" sentence. Language only; set lazily. */
   qwenExplanation?: string;
 }
@@ -182,7 +186,8 @@ export type OpportunityType =
   | "price-match"
   | "long-weekend"
   | "milestone-match"
-  | "wildcard";
+  | "wildcard"
+  | "best-available";
 
 export interface RejectedCandidate {
   offerId: string;

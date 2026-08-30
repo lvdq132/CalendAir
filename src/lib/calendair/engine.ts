@@ -37,6 +37,9 @@ export interface EngineResult {
   activity: AgentActivity[];
   scanned: number;
   constraintsActive: number;
+  safeOffers: number;
+  idealMatches: number;
+  relaxedMatches: number;
   /**
    * True when the provider could not be reached at all — even after retries
    * — rather than a search that genuinely returned nothing. Never collapse
@@ -84,10 +87,23 @@ export function companionOverlap(
 }
 
 export function buildSearchInput(input: EngineInput): FlightSearchInput {
+  // Atlas accepts a return *date*, while CALENDAIR owns an exact arrival
+  // deadline. Querying the next-commitment date used to ask Atlas for Monday
+  // returns even when an eight-hour safety buffer meant the traveller really
+  // had to be home Sunday evening. The engine then correctly rejected every
+  // result as late. Move the provider query itself to the latest safe arrival
+  // instant; the exact timestamps are still checked again below.
+  const latestSafeArrival = new Date(
+    Math.min(
+      Date.parse(input.window.endIso),
+      Date.parse(input.nextCommitmentIso) - input.taste.returnBufferMinutes * 60_000,
+    ),
+  ).toISOString();
+
   return {
     origin: input.window.originAirport,
     departureAfter: input.window.startIso,
-    returnBefore: input.window.endIso,
+    returnBefore: latestSafeArrival,
     adults: input.adults ?? (input.window.companionIds.length > 0 ? 2 : 1),
     cabin: "ECONOMY",
     nonstopPreferred: input.taste.directPreferred,
@@ -185,28 +201,48 @@ export async function runOpportunityEngine(
   activity.push(
     event(
       "CALENDAIR",
-      "Filtering on hard constraints",
-      `${rejected.length} rejected · ${scored.length} viable`,
+      "Filtering for safety",
+      `${rejected.length} unsafe · ${scored.length} safe`,
       true,
     ),
   );
 
-  // Best score wins; ties break on the cheaper fare, then the longer stay.
-  scored.sort(
-    (a, b) =>
-      b.escapeScore - a.escapeScore ||
-      a.totalPrice - b.totalPrice ||
-      b.usefulMinutes - a.usefulMinutes,
-  );
-
-  const [recommended, ...rest] = scored;
+  // Full preference matches lead whenever they exist. If none exist, rank the
+  // safe offers by fewest relaxations and then score. This is the graceful
+  // fallback: it can relax comfort, never calendar, budget or bookability.
+  const byScore = (a: ScoredTrip, b: ScoredTrip) =>
+    b.escapeScore - a.escapeScore ||
+    a.totalPrice - b.totalPrice ||
+    b.usefulMinutes - a.usefulMinutes;
+  const ideal = scored.filter((trip) => trip.relaxedPreferences.length === 0).sort(byScore);
+  const relaxed = scored
+    .filter((trip) => trip.relaxedPreferences.length > 0)
+    .sort((a, b) => a.relaxedPreferences.length - b.relaxedPreferences.length || byScore(a, b));
+  const ranked = ideal.length > 0 ? [...ideal, ...relaxed] : relaxed;
+  const [lead, ...rest] = ranked;
+  const fallback = Boolean(lead && ideal.length === 0);
+  const recommended = lead
+    ? fallback
+      ? {
+          ...lead,
+          bestAvailableMatch: true,
+          opportunityType: "best-available" as const,
+          reasons: [
+            `${lead.relaxedPreferences.length === 1 ? "One preference" : `${lead.relaxedPreferences.length} preferences`} relaxed · still fits your schedule.`,
+            ...lead.reasons,
+          ],
+        }
+      : lead
+    : undefined;
 
   activity.push(
     event(
       "CALENDAIR",
       "Scoring and ranking",
       recommended
-        ? `${recommended.destinationName} leads on ${recommended.escapeScore}`
+        ? fallback
+          ? `${recommended.destinationName} is the best safe option · ${recommended.relaxedPreferences.length} preference${recommended.relaxedPreferences.length === 1 ? "" : "s"} relaxed`
+          : `${recommended.destinationName} leads on ${recommended.escapeScore}`
         : providerUnavailable
           ? "Skipped — the provider could not be reached"
           : "No itinerary cleared every hard constraint",
@@ -222,7 +258,10 @@ export async function runOpportunityEngine(
     rejected,
     activity,
     scanned: offers.length,
-    constraintsActive: 9,
+    constraintsActive: 4 + (input.window.companionIds.length > 0 ? 1 : 0),
+    safeOffers: scored.length,
+    idealMatches: ideal.length,
+    relaxedMatches: relaxed.length,
     providerUnavailable,
     providerUnavailableDetail,
   };

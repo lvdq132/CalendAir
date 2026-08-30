@@ -4,12 +4,14 @@ import type { NormalizedOffer, RejectedCandidate, TravelTaste, DetectedWindow } 
 import { minutesBetween, usefulTimeAtDestination } from "./time";
 
 /**
- * FR-004 — hard constraints.
+ * FR-004 — safety constraints and scored preferences.
  *
  * These are pass/fail, evaluated in code, and no score can overturn them. A
  * language model is never consulted here: a model that decides a budget is
  * "close enough" produces a trip the traveller cannot afford, and a model that
- * rounds a return time produces one they cannot make.
+ * rounds a return time produces one they cannot make. Comfort preferences are
+ * recorded on a passing verdict so scoring can penalise them without pretending
+ * that a safe, bookable itinerary does not exist.
  */
 
 export interface ConstraintContext {
@@ -33,7 +35,15 @@ export interface ConstraintVerdict {
    * and compare two different units by accident.
    */
   ceiling: number;
+  /** Preferences this safe offer misses. These lower rank; they never waive safety. */
+  preferenceMisses: PreferenceMiss[];
   rejection?: RejectedCandidate;
+}
+
+export interface PreferenceMiss {
+  id: "usefulHours" | "flightDuration" | "stops";
+  label: string;
+  detail: string;
 }
 
 const money = (n: number, currency: string) =>
@@ -52,6 +62,7 @@ export function checkHardConstraints(
     days: 0,
     returnBufferMinutes: 0,
     ceiling: 0,
+    preferenceMisses: [],
     rejection: { offerId: offer.id, destinationName, rule, detail },
   });
 
@@ -107,47 +118,50 @@ export function checkHardConstraints(
     );
   }
 
+  // Bookability is provider truth, not a taste. A reference or withdrawn fare
+  // cannot enter a flow that promises a fresh verification before purchase.
+  if (!offer.bookable || offer.referenceOnly) {
+    return reject(
+      offer.referenceOnly ? "Reference price only" : "Offer not bookable",
+      offer.referenceOnly
+        ? "This fare is for comparison and cannot be verified or booked."
+        : "The provider marked this itinerary as unavailable for booking.",
+    );
+  }
+
   const stay = usefulTimeAtDestination(
     offer.outboundArrivalIso,
     offer.returnDepartureIso,
     dest?.zone ?? "UTC",
   );
+  const preferenceMisses: PreferenceMiss[] = [];
   if (stay.usefulMinutes < ctx.taste.minUsefulHours * 60) {
-    return reject(
-      "Not enough time there",
-      `${Math.round(stay.usefulMinutes / 60)}h on the ground against a minimum of ${
-        ctx.taste.minUsefulHours
-      }h.`,
-    );
+    preferenceMisses.push({
+      id: "usefulHours",
+      label: "Shorter stay",
+      detail: `${Math.round(stay.usefulMinutes / 60)}h on the ground versus ${ctx.taste.minUsefulHours}h preferred.`,
+    });
   }
 
   const legMinutes = minutesBetween(offer.outboundDepartureIso, offer.outboundArrivalIso);
   if (legMinutes > ctx.taste.maxFlightMinutes) {
-    return reject(
-      "Flight too long",
-      `${Math.round(legMinutes / 60)}h each way against a tolerance of ${Math.round(
-        ctx.taste.maxFlightMinutes / 60,
-      )}h.`,
-    );
+    preferenceMisses.push({
+      id: "flightDuration",
+      label: "Longer flight",
+      detail: `${Math.round(legMinutes / 60)}h each way versus ${Math.round(ctx.taste.maxFlightMinutes / 60)}h preferred.`,
+    });
   }
 
   if (offer.stops > ctx.taste.maxStops) {
-    return reject(
-      "Too many connections",
-      `${offer.stops} stops against a tolerance of ${ctx.taste.maxStops}.`,
-    );
+    preferenceMisses.push({
+      id: "stops",
+      label: "Extra connection",
+      detail: `${offer.stops} stops versus ${ctx.taste.maxStops} preferred.`,
+    });
   }
 
   if (!ctx.companionAvailable && ctx.window.companionIds.length > 0) {
     return reject("Companion not free", "Your companion has a conflict inside this window.");
-  }
-
-  // A reference price is comparison-only and must never reach a booking flow.
-  if (offer.referenceOnly) {
-    return reject(
-      "Reference price only",
-      "This fare is for comparison and cannot be verified or booked.",
-    );
   }
 
   return {
@@ -157,5 +171,6 @@ export function checkHardConstraints(
     days: stay.days,
     returnBufferMinutes: buffer,
     ceiling,
+    preferenceMisses,
   };
 }

@@ -51,6 +51,9 @@ export interface EngineSnapshot {
   rejected: RejectedCandidate[];
   scanned: number;
   constraintsActive: number;
+  safeOffers: number;
+  idealMatches: number;
+  relaxedMatches: number;
 }
 
 export type Outcome =
@@ -227,6 +230,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         rejected: data.rejected ?? [],
         scanned: data.scanned ?? 0,
         constraintsActive: data.constraintsActive ?? 0,
+        safeOffers: data.safeOffers ?? 0,
+        idealMatches: data.idealMatches ?? 0,
+        relaxedMatches: data.relaxedMatches ?? 0,
       };
       setEngine(snapshot);
       setBooking((b) => ({ ...b, state: data.state }));
